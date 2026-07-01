@@ -336,7 +336,8 @@ def speichern(text, daten):
 
 
 def sende_email(text, daten):
-    nachricht = MIMEText(text, "plain", "utf-8")
+    einleitung = "Hier mein heutiger Morgenreport – was empfiehlst du mir fürs Training heute?\n\n"
+    nachricht = MIMEText(einleitung + text, "plain", "utf-8")
     nachricht["Subject"] = f"Morgenreport {daten['datum']}"
     nachricht["From"] = GMAIL_ADRESSE
     nachricht["To"] = EMPFAENGER
