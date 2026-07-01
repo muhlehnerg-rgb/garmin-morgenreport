@@ -48,4 +48,6 @@ jobs:
           GMAIL_ADRESSE: ${{ secrets.GMAIL_ADRESSE }}
           GMAIL_APP_PASSWORT: ${{ secrets.GMAIL_APP_PASSWORT }}
           MORGENREPORT_EMPFAENGER: ${{ secrets.MORGENREPORT_EMPFAENGER }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python morgenreport.py

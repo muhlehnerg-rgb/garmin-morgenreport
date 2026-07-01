@@ -1,5 +1,6 @@
 import os
 import smtplib
+import requests
 from email.mime.text import MIMEText
 from datetime import date
 from garminconnect import Garmin
@@ -12,6 +13,9 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GMAIL_ADRESSE = os.environ.get("GMAIL_ADRESSE", "muhlehner.g@gmail.com")
 GMAIL_APP_PASSWORT = os.environ.get("GMAIL_APP_PASSWORT", "")
 EMPFAENGER = os.environ.get("MORGENREPORT_EMPFAENGER", "muhlehner.g@gmail.com")
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "***ENTFERNT***")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "***ENTFERNT***")
 
 TOKEN_ORDNER = os.path.join(os.path.dirname(__file__), ".garmin_tokens")
 
@@ -396,6 +400,15 @@ def sende_email(text, daten):
     print(f"E-Mail gesendet an: {EMPFAENGER}")
 
 
+def sende_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    # Telegram erlaubt max. 4096 Zeichen pro Nachricht -> in Teile aufsplitten
+    for i in range(0, len(text), 4000):
+        teil = text[i:i + 4000]
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": teil})
+    print("Telegram-Nachricht gesendet.")
+
+
 def main():
     print("Verbinde mit Garmin Connect...")
     client = login()
@@ -419,6 +432,11 @@ def main():
         sende_email(text, daten)
     except Exception as e:
         print(f"E-Mail konnte nicht gesendet werden: {e}")
+
+    try:
+        sende_telegram(text)
+    except Exception as e:
+        print(f"Telegram-Nachricht konnte nicht gesendet werden: {e}")
 
 
 if __name__ == "__main__":
