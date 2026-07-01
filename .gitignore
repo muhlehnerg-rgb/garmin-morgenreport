@@ -1,0 +1,4 @@
+.garmin_tokens/
+reports/
+morgenreport_starten.bat
+__pycache__/

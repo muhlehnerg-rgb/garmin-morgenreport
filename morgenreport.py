@@ -1,0 +1,376 @@
+import os
+import smtplib
+from email.mime.text import MIMEText
+from datetime import date
+from garminconnect import Garmin
+import anthropic
+
+EMAIL = os.environ.get("GARMIN_EMAIL", "muhlehner.g@gmail.com")
+PASSWORD = os.environ.get("GARMIN_PASSWORD", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+GMAIL_ADRESSE = os.environ.get("GMAIL_ADRESSE", "muhlehner.g@gmail.com")
+GMAIL_APP_PASSWORT = os.environ.get("GMAIL_APP_PASSWORT", "")
+EMPFAENGER = os.environ.get("MORGENREPORT_EMPFAENGER", "muhlehner.g@gmail.com")
+
+TOKEN_ORDNER = os.path.join(os.path.dirname(__file__), ".garmin_tokens")
+
+
+def login():
+    try:
+        client = Garmin()
+        client.login(TOKEN_ORDNER)
+        return client
+    except Exception:
+        client = Garmin(EMAIL, PASSWORD, prompt_mfa=lambda: input("Garmin MFA-Code: "))
+        client.login()
+        client.client.dump(TOKEN_ORDNER)
+        return client
+
+
+def sicher(fn, *args, default=None):
+    try:
+        return fn(*args)
+    except Exception:
+        return default
+
+
+def hole_daten(client):
+    today = date.today().isoformat()
+
+    stats      = sicher(client.get_stats, today, default={})
+    sleep      = sicher(client.get_sleep_data, today, default={})
+    hrv_data   = sicher(client.get_hrv_data, today, default={})
+    stress     = sicher(client.get_stress_data, today, default={})
+    steps      = sicher(client.get_steps_data, today, default=[])
+    spo2       = sicher(client.get_spo2_data, today, default={})
+    resp       = sicher(client.get_respiration_data, today, default={})
+    readiness  = sicher(client.get_training_readiness, today, default={})
+    intensity  = sicher(client.get_weekly_intensity_minutes, today, default={})
+    metrics    = sicher(client.get_max_metrics, today, default=[])
+
+    # Schlaf
+    sleep_dto      = sleep.get("dailySleepDTO", {})
+    schlafdauer_h  = round((sleep_dto.get("sleepTimeSeconds") or 0) / 3600, 1)
+    schlaf_score   = sleep_dto.get("sleepScores", {}).get("overall", {}).get("value") or 0
+    tief_min       = round((sleep_dto.get("deepSleepSeconds") or 0) / 60)
+    leicht_min     = round((sleep_dto.get("lightSleepSeconds") or 0) / 60)
+    rem_min        = round((sleep_dto.get("remSleepSeconds") or 0) / 60)
+    wach_min       = round((sleep_dto.get("awakeSleepSeconds") or 0) / 60)
+
+    # HRV
+    hrv = None
+    if hrv_data:
+        hrv = hrv_data.get("hrvSummary", {}).get("lastNightAvg")
+
+    # Stress
+    stress_avg = None
+    if stress:
+        stress_avg = stress.get("avgStressLevel")
+
+    # Schritte
+    schritte = None
+    if steps and isinstance(steps, list) and len(steps) > 0:
+        total = sum(s.get("steps", 0) for s in steps if isinstance(s, dict))
+        schritte = total if total > 0 else None
+
+    # SpO2
+    spo2_avg = None
+    if spo2:
+        spo2_avg = spo2.get("averageSpO2")
+
+    # Atemfrequenz
+    atem_avg = None
+    if resp:
+        atem_avg = resp.get("avgWakingRespirationValue")
+
+    # Training Readiness
+    tr_score = None
+    tr_level = None
+    if readiness:
+        if isinstance(readiness, list) and len(readiness) > 0:
+            tr_score = readiness[0].get("score")
+            tr_level = readiness[0].get("level")
+        elif isinstance(readiness, dict):
+            tr_score = readiness.get("score")
+            tr_level = readiness.get("level")
+
+    # Intensitätsminuten (Woche)
+    int_min_woche = None
+    if intensity:
+        mod  = intensity.get("weeklyModerateIntensityMinutes") or 0
+        vig  = intensity.get("weeklyVigorousIntensityMinutes") or 0
+        if mod or vig:
+            int_min_woche = mod + vig * 2  # WHO-Formel: intensive Minuten zählen doppelt
+
+    # VO2 Max
+    vo2max = None
+    if metrics and isinstance(metrics, list):
+        for m in metrics:
+            v = m.get("generic", {}).get("vo2MaxPreciseValue")
+            if v:
+                vo2max = round(v, 1)
+                break
+
+    return {
+        "datum":          today,
+        "body_battery":   stats.get("bodyBatteryMostRecentValue") or 0,
+        "ruhepuls":       stats.get("restingHeartRate") or 0,
+        "schlafdauer_h":  schlafdauer_h,
+        "schlaf_score":   schlaf_score,
+        "tief_min":       tief_min,
+        "leicht_min":     leicht_min,
+        "rem_min":        rem_min,
+        "wach_min":       wach_min,
+        "hrv":            hrv,
+        "stress_avg":     stress_avg,
+        "schritte":       schritte,
+        "spo2":           spo2_avg,
+        "atemfrequenz":   atem_avg,
+        "tr_score":       tr_score,
+        "tr_level":       tr_level,
+        "int_min_woche":  int_min_woche,
+        "vo2max":         vo2max,
+    }
+
+
+def berechne_erholung(daten):
+    score = 0
+    gruende = []
+
+    bb = daten["body_battery"]
+    if bb >= 75:
+        score += 30
+    elif bb >= 50:
+        score += 22
+        gruende.append(f"Body Battery mittelmäßig ({bb})")
+    elif bb >= 25:
+        score += 12
+        gruende.append(f"Body Battery niedrig ({bb})")
+    else:
+        gruende.append(f"Body Battery sehr niedrig ({bb})")
+
+    ss = daten["schlaf_score"]
+    if ss >= 80:
+        score += 25
+    elif ss >= 60:
+        score += 18
+        gruende.append(f"Schlaf-Score mäßig ({ss})")
+    elif ss >= 40:
+        score += 9
+        gruende.append(f"Schlaf-Score schlecht ({ss})")
+    else:
+        gruende.append(f"Schlaf-Score sehr schlecht ({ss})")
+
+    h = daten["schlafdauer_h"]
+    if h >= 7.5:
+        score += 15
+    elif h >= 6.5:
+        score += 10
+        gruende.append(f"Schlafdauer knapp ({h}h)")
+    elif h >= 5.5:
+        score += 5
+        gruende.append(f"Schlafdauer zu kurz ({h}h)")
+    else:
+        gruende.append(f"Schlafdauer sehr kurz ({h}h)")
+
+    hrv = daten["hrv"]
+    if hrv:
+        if hrv >= 50:
+            score += 10
+        elif hrv >= 35:
+            score += 6
+            gruende.append(f"HRV leicht reduziert ({hrv})")
+        else:
+            gruende.append(f"HRV niedrig ({hrv})")
+
+    stress = daten["stress_avg"]
+    if stress:
+        if stress <= 25:
+            score += 10
+        elif stress <= 50:
+            score += 6
+            gruende.append(f"Stresslevel erhöht ({stress})")
+        else:
+            gruende.append(f"Stresslevel hoch ({stress})")
+
+    tr = daten["tr_score"]
+    if tr:
+        if tr >= 75:
+            score += 10
+        elif tr >= 50:
+            score += 6
+            gruende.append(f"Training Readiness mäßig ({tr})")
+        else:
+            gruende.append(f"Training Readiness niedrig ({tr})")
+
+    return min(score, 100), gruende
+
+
+def trainingsempfehlung(score):
+    if score >= 75:
+        return "VOLLES TRAINING", "Alle geplanten Einheiten wie vorgesehen."
+    elif score >= 55:
+        return "NORMALES TRAINING", "Training wie geplant, auf Körpersignale achten."
+    elif score >= 35:
+        return "REDUZIERTE INTENSITÄT", "Volumen -20%, Intensität -1 Zone. Kein HIIT heute."
+    else:
+        return "REGENERATION", "Nur lockeres Gehen, Mobilität oder komplette Pause."
+
+
+def frage_fitness_coach(daten, score, empfehlung):
+    print("Frage Fitness-Coach...")
+
+    def w(val, einheit="", na="n/a"):
+        return f"{val}{einheit}" if val is not None else na
+
+    prompt = f"""Meine heutigen Garmin-Daten vom {daten['datum']}:
+
+SCHLAF:
+- Schlafdauer: {w(daten['schlafdauer_h'], 'h')}
+- Schlaf-Score: {w(daten['schlaf_score'])}
+- Tiefschlaf: {w(daten['tief_min'], ' min')}
+- REM-Schlaf: {w(daten['rem_min'], ' min')}
+- Leichtschlaf: {w(daten['leicht_min'], ' min')}
+- Wachzeit: {w(daten['wach_min'], ' min')}
+
+ERHOLUNG:
+- Body Battery: {w(daten['body_battery'])}
+- HRV: {w(daten['hrv'])}
+- Ruhepuls: {w(daten['ruhepuls'], ' bpm')}
+- Stresslevel gestern: {w(daten['stress_avg'])}
+- Training Readiness: {w(daten['tr_score'])} ({w(daten['tr_level'])})
+- Erholungsscore: {score}/100
+
+AKTIVITÄT:
+- Schritte gestern: {w(daten['schritte'])}
+- Intensitätsminuten diese Woche: {w(daten['int_min_woche'])}
+- VO2 Max: {w(daten['vo2max'])}
+
+GESUNDHEIT:
+- SpO2: {w(daten['spo2'], '%')}
+- Atemfrequenz: {w(daten['atemfrequenz'], ' Atemzüge/min')}
+
+Automatische Empfehlung: {empfehlung}
+
+Bitte gib mir eine kurze, persönliche Einschätzung und konkrete Trainingsempfehlung für heute."""
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        system="Du bist mein persönlicher Fitness-Coach. Du analysierst meine täglichen Garmin-Daten und gibst mir kurze, motivierende und konkrete Empfehlungen auf Deutsch. Antworte in maximal 6 Sätzen.",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text
+
+
+def na(val, einheit=""):
+    return f"{val}{einheit}" if val is not None else "n/a"
+
+
+def erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort=None):
+    t = "─" * 40
+    zeilen = [
+        "═" * 40,
+        f"  MORGENREPORT  {daten['datum']}",
+        "═" * 40,
+        "",
+        "  SCHLAF",
+        t,
+        f"  Schlafdauer:        {na(daten['schlafdauer_h'], 'h')}",
+        f"  Schlaf-Score:       {na(daten['schlaf_score'])}",
+        f"  Tiefschlaf:         {na(daten['tief_min'], ' min')}",
+        f"  REM-Schlaf:         {na(daten['rem_min'], ' min')}",
+        f"  Leichtschlaf:       {na(daten['leicht_min'], ' min')}",
+        f"  Wachzeit:           {na(daten['wach_min'], ' min')}",
+        "",
+        "  ERHOLUNG",
+        t,
+        f"  Body Battery:       {na(daten['body_battery'])}",
+        f"  HRV:                {na(daten['hrv'])}",
+        f"  Ruhepuls:           {na(daten['ruhepuls'], ' bpm')}",
+        f"  Stresslevel:        {na(daten['stress_avg'])}",
+        f"  Training Readiness: {na(daten['tr_score'])} ({na(daten['tr_level'])})",
+        "",
+        "  AKTIVITÄT",
+        t,
+        f"  Schritte gestern:   {na(daten['schritte'])}",
+        f"  Intensitätsmin/Wo:  {na(daten['int_min_woche'])}",
+        f"  VO2 Max:            {na(daten['vo2max'])}",
+        "",
+        "  GESUNDHEIT",
+        t,
+        f"  SpO2:               {na(daten['spo2'], '%')}",
+        f"  Atemfrequenz:       {na(daten['atemfrequenz'], ' /min')}",
+        "",
+        t,
+        f"  Erholungsscore: {score}/100",
+    ]
+    if gruende:
+        zeilen += ["", "  Hinweise:"]
+        for g in gruende:
+            zeilen.append(f"   - {g}")
+    zeilen += [
+        "",
+        t,
+        f"  Empfehlung: {empfehlung}",
+        f"  {details}",
+        "═" * 40,
+    ]
+    if coach_antwort:
+        zeilen += ["", "  FITNESS-COACH:", t, ""]
+        for zeile in coach_antwort.split("\n"):
+            zeilen.append(f"  {zeile}")
+        zeilen.append("═" * 40)
+    return "\n".join(zeilen)
+
+
+def speichern(text, daten):
+    ordner = os.path.join(os.path.dirname(__file__), "reports")
+    os.makedirs(ordner, exist_ok=True)
+    dateiname = os.path.join(ordner, f"report_{daten['datum']}.txt")
+    with open(dateiname, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Report gespeichert: {dateiname}")
+
+
+def sende_email(text, daten):
+    nachricht = MIMEText(text, "plain", "utf-8")
+    nachricht["Subject"] = f"Morgenreport {daten['datum']}"
+    nachricht["From"] = GMAIL_ADRESSE
+    nachricht["To"] = EMPFAENGER
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(GMAIL_ADRESSE, GMAIL_APP_PASSWORT)
+        server.sendmail(GMAIL_ADRESSE, EMPFAENGER, nachricht.as_string())
+    print(f"E-Mail gesendet an: {EMPFAENGER}")
+
+
+def main():
+    print("Verbinde mit Garmin Connect...")
+    client = login()
+    print("OK\n")
+    print("Lade Garmin-Daten...")
+    daten = hole_daten(client)
+    score, gruende = berechne_erholung(daten)
+    empfehlung, details = trainingsempfehlung(score)
+
+    coach_antwort = None
+    try:
+        coach_antwort = frage_fitness_coach(daten, score, empfehlung)
+    except Exception as e:
+        print(f"Fitness-Coach nicht erreichbar: {e}")
+
+    text = erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort)
+    print(f"\n{text}\n")
+    speichern(text, daten)
+
+    try:
+        sende_email(text, daten)
+    except Exception as e:
+        print(f"E-Mail konnte nicht gesendet werden: {e}")
+
+
+if __name__ == "__main__":
+    main()

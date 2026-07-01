@@ -1,0 +1,36 @@
+name: Morgenreport
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  morgenreport:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Garmin-Tokens wiederherstellen
+        run: |
+          mkdir -p .garmin_tokens
+          echo "${{ secrets.GARMIN_TOKENS_B64 }}" | base64 -d > .garmin_tokens/garmin_tokens.json
+
+      - name: Morgenreport ausführen
+        env:
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_ADRESSE: ${{ secrets.GMAIL_ADRESSE }}
+          GMAIL_APP_PASSWORT: ${{ secrets.GMAIL_APP_PASSWORT }}
+          MORGENREPORT_EMPFAENGER: ${{ secrets.MORGENREPORT_EMPFAENGER }}
+        run: python morgenreport.py
