@@ -3,29 +3,44 @@ name: Morgenreport
 on:
   schedule:
     - cron: "0 8 * * *"
+    - cron: "0 9 * * *"
   workflow_dispatch:
 
 jobs:
   morgenreport:
     runs-on: ubuntu-latest
     steps:
+      - name: Zeitzonen-Check (nur bei 10 Uhr Wien weiterlaufen)
+        if: github.event_name == 'schedule'
+        run: |
+          STUNDE=$(TZ=Europe/Vienna date +%H)
+          echo "Aktuelle Stunde in Wien: $STUNDE"
+          if [ "$STUNDE" != "10" ]; then
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Code auschecken
+        if: env.SKIP != 'true'
         uses: actions/checkout@v4
 
       - name: Python einrichten
+        if: env.SKIP != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Abhängigkeiten installieren
+        if: env.SKIP != 'true'
         run: pip install -r requirements.txt
 
       - name: Garmin-Tokens wiederherstellen
+        if: env.SKIP != 'true'
         run: |
           mkdir -p .garmin_tokens
           echo "${{ secrets.GARMIN_TOKENS_B64 }}" | base64 -d > .garmin_tokens/garmin_tokens.json
 
       - name: Morgenreport ausführen
+        if: env.SKIP != 'true'
         env:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
