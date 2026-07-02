@@ -3,25 +3,38 @@ name: Morgenreport
 on:
   schedule:
     - cron: "0 8 * * *"
+    - cron: "30 8 * * *"
     - cron: "0 9 * * *"
+    - cron: "30 9 * * *"
+    - cron: "0 10 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   morgenreport:
     runs-on: ubuntu-latest
     steps:
-      - name: Zeitzonen-Check (nur bei 10 Uhr Wien weiterlaufen)
-        if: github.event_name == 'schedule'
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Prüfen ob heute schon gesendet wurde
+        id: check
         run: |
-          STUNDE=$(TZ=Europe/Vienna date +%H)
-          echo "Aktuelle Stunde in Wien: $STUNDE"
-          if [ "$STUNDE" != "10" ]; then
+          HEUTE=$(TZ=Europe/Vienna date +%Y-%m-%d)
+          STUNDE=$(TZ=Europe/Vienna date +%-H)
+          echo "Heute (Wien): $HEUTE, Stunde: $STUNDE"
+
+          if [ -f ".last_sent_date.txt" ] && [ "$(cat .last_sent_date.txt)" = "$HEUTE" ]; then
+            echo "Heute wurde bereits gesendet. Überspringe."
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          elif [ "$github_event_name" = "schedule" ] && [ "$STUNDE" -lt 9 ]; then
+            echo "Noch zu früh am Morgen. Überspringe."
             echo "SKIP=true" >> "$GITHUB_ENV"
           fi
-
-      - name: Code auschecken
-        if: env.SKIP != 'true'
-        uses: actions/checkout@v4
+        env:
+          github_event_name: ${{ github.event_name }}
 
       - name: Python einrichten
         if: env.SKIP != 'true'
@@ -51,3 +64,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python morgenreport.py
+
+      - name: Heutiges Datum als "gesendet" markieren
+        if: env.SKIP != 'true'
+        run: |
+          TZ=Europe/Vienna date +%Y-%m-%d > .last_sent_date.txt
+          git config user.name "Morgenreport Bot"
+          git config user.email "actions@github.com"
+          git add .last_sent_date.txt
+          git commit -m "Marker: Report für heute gesendet" || echo "Nichts zu committen"
+          git push
