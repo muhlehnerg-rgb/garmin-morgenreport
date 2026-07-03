@@ -1,4 +1,5 @@
 import os
+import sys
 import smtplib
 import requests
 from email.mime.text import MIMEText
@@ -6,6 +7,12 @@ from datetime import date, timedelta
 from garminconnect import Garmin
 import anthropic
 from coach_prompt import COACH_SYSTEM_PROMPT
+
+# Windows-Konsolen sind oft nicht UTF-8; ohne das crasht print() an ═/✔-Zeichen
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 EMAIL = os.environ.get("GARMIN_EMAIL", "muhlehner.g@gmail.com")
 PASSWORD = os.environ.get("GARMIN_PASSWORD", "")
@@ -180,16 +187,35 @@ def hole_gewohnheiten():
 
 
 def gewohnheiten_gestern(liste):
+    # Quote nach derselben Logik wie die Erfolgsrate in der Tracker-Webapp:
+    # Haken-Gewohnheiten plus Zahl-Gewohnheiten mit Min/Max-Ziel,
+    # jeweils nur wenn "In Erfolgsrate einbeziehen" nicht deaktiviert ist.
     gestern = (date.today() - timedelta(days=1)).isoformat()
-    relevante = [g for g in liste if g.get("typ") == "haken" and not g.get("ausgeblendet")]
     ergebnisse = []
-    erledigt = 0
-    for g in relevante:
-        ok = bool((g.get("eintraege") or {}).get(gestern))
-        ergebnisse.append((g.get("name", "?"), ok))
-        if ok:
-            erledigt += 1
-    quote = round(erledigt / len(relevante) * 100) if relevante else None
+    zaehler = []
+    for g in liste:
+        typ = g.get("typ")
+        if typ in ("header", "divider", "auswahl") or g.get("ausgeblendet"):
+            continue
+        in_quote = g.get("inErfolgsrate") is not False
+        if typ == "zahl":
+            ziel_min = g.get("zielMin")
+            ziel_max = g.get("zielMax")
+            if ziel_min is None and ziel_max is None:
+                continue
+            wert = (g.get("eintraege") or {}).get(gestern)
+            ok = (wert is not None
+                  and (ziel_min is None or wert >= ziel_min)
+                  and (ziel_max is None or wert <= ziel_max))
+            einheit = f" {g['einheit']}" if g.get("einheit") else ""
+            anzeige = f"{g.get('name', '?')} ({wert if wert is not None else '–'}{einheit})"
+            ergebnisse.append((anzeige, ok))
+        else:
+            ok = bool((g.get("eintraege") or {}).get(gestern))
+            ergebnisse.append((g.get("name", "?"), ok))
+        if in_quote:
+            zaehler.append(ok)
+    quote = round(sum(zaehler) / len(zaehler) * 100) if zaehler else None
     return ergebnisse, quote
 
 
