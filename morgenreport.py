@@ -5,8 +5,6 @@ import requests
 from email.mime.text import MIMEText
 from datetime import date, timedelta
 from garminconnect import Garmin
-import anthropic
-from coach_prompt import COACH_SYSTEM_PROMPT
 
 # Windows-Konsolen sind oft nicht UTF-8; ohne das crasht print() an ═/✔-Zeichen
 try:
@@ -16,7 +14,6 @@ except Exception:
 
 EMAIL = os.environ.get("GARMIN_EMAIL", "muhlehner.g@gmail.com")
 PASSWORD = os.environ.get("GARMIN_PASSWORD", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 GMAIL_ADRESSE = os.environ.get("GMAIL_ADRESSE", "muhlehner.g@gmail.com")
 GMAIL_APP_PASSWORT = os.environ.get("GMAIL_APP_PASSWORT", "")
@@ -326,66 +323,11 @@ def trainingsempfehlung(score):
         return "REGENERATION", "Nur lockeres Gehen, Mobilität oder komplette Pause."
 
 
-def frage_fitness_coach(daten, score, empfehlung, gewohnheiten=None):
-    print("Frage Fitness-Coach...")
-
-    def w(val, einheit="", na="n/a"):
-        return f"{val}{einheit}" if val is not None else na
-
-    prompt = f"""Meine heutigen Garmin-Daten vom {daten['datum']}:
-
-SCHLAF:
-- Schlafdauer: {w(daten['schlafdauer_h'], 'h')}
-- Schlaf-Score: {w(daten['schlaf_score'])}
-- Tiefschlaf: {w(daten['tief_min'], ' min')}
-- REM-Schlaf: {w(daten['rem_min'], ' min')}
-- Leichtschlaf: {w(daten['leicht_min'], ' min')}
-- Wachzeit: {w(daten['wach_min'], ' min')}
-
-ERHOLUNG:
-- Body Battery: {w(daten['body_battery'])}
-- HRV: {w(daten['hrv'])}
-- Ruhepuls: {w(daten['ruhepuls'], ' bpm')}
-- Stresslevel gestern: {w(daten['stress_avg'])}
-- Training Readiness: {w(daten['tr_score'])} ({w(daten['tr_level'])})
-- Erholungsscore: {score}/100
-
-AKTIVITÄT:
-- Schritte gestern: {w(daten['schritte'])}
-- Intensitätsminuten diese Woche: {w(daten['int_min_woche'])}
-- VO2 Max: {w(daten['vo2max'])}
-
-GESUNDHEIT:
-- SpO2: {w(daten['spo2'], '%')}
-- Atemfrequenz: {w(daten['atemfrequenz'], ' Atemzüge/min')}
-
-Automatische Empfehlung: {empfehlung}
-"""
-    if gewohnheiten:
-        ergebnisse, quote = gewohnheiten
-        prompt += "\nGEWOHNHEITEN GESTERN:\n"
-        for name, ok in ergebnisse:
-            prompt += f"- {name}: {'erledigt' if ok else 'nicht erledigt'}\n"
-        if quote is not None:
-            prompt += f"Erfolgsquote: {quote}%\n"
-
-    prompt += "\nBitte gib mir eine kurze, persönliche Einschätzung und konkrete Trainingsempfehlung für heute. Beziehe die Gewohnheiten mit ein, falls sie einen erkennbaren Zusammenhang zur Erholung zeigen."
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=700,
-        system=COACH_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text
-
-
 def na(val, einheit=""):
     return f"{val}{einheit}" if val is not None else "n/a"
 
 
-def erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort=None, gewohnheiten=None):
+def erstelle_text(daten, score, gruende, gewohnheiten=None):
     t = "─" * 40
     zeilen = [
         "═" * 40,
@@ -437,18 +379,7 @@ def erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort=None
         zeilen += ["", "  Hinweise:"]
         for g in gruende:
             zeilen.append(f"   - {g}")
-    zeilen += [
-        "",
-        t,
-        f"  Empfehlung: {empfehlung}",
-        f"  {details}",
-        "═" * 40,
-    ]
-    if coach_antwort:
-        zeilen += ["", "  FITNESS-COACH:", t, ""]
-        for zeile in coach_antwort.split("\n"):
-            zeilen.append(f"  {zeile}")
-        zeilen.append("═" * 40)
+    zeilen.append("═" * 40)
     return "\n".join(zeilen)
 
 
@@ -491,7 +422,8 @@ def main():
     print("Lade Garmin-Daten...")
     daten = hole_daten(client)
     score, gruende = berechne_erholung(daten)
-    empfehlung, details = trainingsempfehlung(score)
+    # Empfehlung wird nur noch für die Dashboard-Kachel in Firestore gebraucht
+    empfehlung, _ = trainingsempfehlung(score)
 
     gewohnheiten = None
     habit_quote = None
@@ -502,13 +434,7 @@ def main():
     except Exception as e:
         print(f"Gewohnheiten konnten nicht geladen werden: {e}")
 
-    coach_antwort = None
-    try:
-        coach_antwort = frage_fitness_coach(daten, score, empfehlung, gewohnheiten)
-    except Exception as e:
-        print(f"Fitness-Coach nicht erreichbar: {e}")
-
-    text = erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort, gewohnheiten)
+    text = erstelle_text(daten, score, gruende, gewohnheiten)
     print(f"\n{text}\n")
     speichern(text, daten)
 
