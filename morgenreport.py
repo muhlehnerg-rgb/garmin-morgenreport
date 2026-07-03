@@ -22,8 +22,8 @@ GMAIL_ADRESSE = os.environ.get("GMAIL_ADRESSE", "muhlehner.g@gmail.com")
 GMAIL_APP_PASSWORT = os.environ.get("GMAIL_APP_PASSWORT", "")
 EMPFAENGER = os.environ.get("MORGENREPORT_EMPFAENGER", "muhlehner.g@gmail.com")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "***ENTFERNT***")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "***ENTFERNT***")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
 FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJEKT}/databases/default/documents"
@@ -468,6 +468,8 @@ def sende_email(text, daten):
 
 
 def sende_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID nicht gesetzt")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     # Telegram erlaubt max. 4096 Zeichen pro Nachricht -> in Teile aufsplitten
     for i in range(0, len(text), 4000):
