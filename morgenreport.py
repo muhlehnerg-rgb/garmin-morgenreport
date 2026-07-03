@@ -45,12 +45,13 @@ def sicher(fn, *args, default=None):
 
 def hole_daten(client):
     today = date.today().isoformat()
+    gestern = (date.today() - timedelta(days=1)).isoformat()
 
     stats      = sicher(client.get_stats, today, default={})
     sleep      = sicher(client.get_sleep_data, today, default={})
     hrv_data   = sicher(client.get_hrv_data, today, default={})
-    stress     = sicher(client.get_stress_data, today, default={})
-    steps      = sicher(client.get_steps_data, today, default=[])
+    stress     = sicher(client.get_stress_data, gestern, default={})
+    steps      = sicher(client.get_steps_data, gestern, default=[])
     spo2       = sicher(client.get_spo2_data, today, default={})
     resp       = sicher(client.get_respiration_data, today, default={})
     readiness  = sicher(client.get_training_readiness, today, default={})
