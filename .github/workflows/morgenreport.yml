@@ -63,6 +63,7 @@ jobs:
           MORGENREPORT_EMPFAENGER: ${{ secrets.MORGENREPORT_EMPFAENGER }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
         run: python morgenreport.py
 
       - name: Heutiges Datum als "gesendet" markieren

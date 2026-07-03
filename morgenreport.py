@@ -27,6 +27,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
 FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJEKT}/databases/default/documents"
+# Zugangsschlüssel: Teil der Dokumentpfade, ohne ihn verweigern die Firestore-Regeln jeden Zugriff
+TRACKER_SECRET = os.environ.get("TRACKER_SECRET", "")
 
 TOKEN_ORDNER = os.path.join(os.path.dirname(__file__), ".garmin_tokens")
 
@@ -179,7 +181,9 @@ def firestore_wert_schreiben(v):
 
 
 def hole_gewohnheiten():
-    resp = requests.get(f"{FIRESTORE_BASIS}/tracker/gewohnheiten", timeout=15)
+    if not TRACKER_SECRET:
+        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
+    resp = requests.get(f"{FIRESTORE_BASIS}/tracker/gewohnheiten_{TRACKER_SECRET}", timeout=15)
     resp.raise_for_status()
     felder = resp.json().get("fields", {})
     liste = felder.get("liste")
@@ -231,8 +235,10 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote):
         "schlaf_score":  daten["schlaf_score"],
         "habit_quote":   habit_quote if habit_quote is not None else -1,
     }
+    if not TRACKER_SECRET:
+        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
-    resp = requests.patch(f"{FIRESTORE_BASIS}/tracker/morgenreport", json=body, timeout=15)
+    resp = requests.patch(f"{FIRESTORE_BASIS}/tracker/morgenreport_{TRACKER_SECRET}", json=body, timeout=15)
     resp.raise_for_status()
 
 
