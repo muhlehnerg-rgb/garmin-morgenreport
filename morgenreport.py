@@ -2,7 +2,7 @@ import os
 import smtplib
 import requests
 from email.mime.text import MIMEText
-from datetime import date
+from datetime import date, timedelta
 from garminconnect import Garmin
 import anthropic
 from coach_prompt import COACH_SYSTEM_PROMPT
@@ -17,6 +17,9 @@ EMPFAENGER = os.environ.get("MORGENREPORT_EMPFAENGER", "muhlehner.g@gmail.com")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "***ENTFERNT***")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "***ENTFERNT***")
+
+FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
+FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJEKT}/databases/default/documents"
 
 TOKEN_ORDNER = os.path.join(os.path.dirname(__file__), ".garmin_tokens")
 
@@ -139,6 +142,73 @@ def hole_daten(client):
     }
 
 
+def firestore_wert_lesen(v):
+    if "stringValue" in v:
+        return v["stringValue"]
+    if "integerValue" in v:
+        return int(v["integerValue"])
+    if "doubleValue" in v:
+        return v["doubleValue"]
+    if "booleanValue" in v:
+        return v["booleanValue"]
+    if "arrayValue" in v:
+        return [firestore_wert_lesen(x) for x in v["arrayValue"].get("values", [])]
+    if "mapValue" in v:
+        return {k: firestore_wert_lesen(val) for k, val in v["mapValue"].get("fields", {}).items()}
+    return None
+
+
+def firestore_wert_schreiben(v):
+    if isinstance(v, bool):
+        return {"booleanValue": v}
+    if isinstance(v, int):
+        return {"integerValue": str(v)}
+    if isinstance(v, float):
+        return {"doubleValue": v}
+    if v is None:
+        return {"nullValue": None}
+    return {"stringValue": str(v)}
+
+
+def hole_gewohnheiten():
+    resp = requests.get(f"{FIRESTORE_BASIS}/tracker/gewohnheiten", timeout=15)
+    resp.raise_for_status()
+    felder = resp.json().get("fields", {})
+    liste = felder.get("liste")
+    return firestore_wert_lesen(liste) if liste else []
+
+
+def gewohnheiten_gestern(liste):
+    gestern = (date.today() - timedelta(days=1)).isoformat()
+    relevante = [g for g in liste if g.get("typ") == "haken" and not g.get("ausgeblendet")]
+    ergebnisse = []
+    erledigt = 0
+    for g in relevante:
+        ok = bool((g.get("eintraege") or {}).get(gestern))
+        ergebnisse.append((g.get("name", "?"), ok))
+        if ok:
+            erledigt += 1
+    quote = round(erledigt / len(relevante) * 100) if relevante else None
+    return ergebnisse, quote
+
+
+def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote):
+    felder = {
+        "datum":         daten["datum"],
+        "score":         score,
+        "empfehlung":    empfehlung,
+        "body_battery":  daten["body_battery"],
+        "hrv":           daten["hrv"] or 0,
+        "ruhepuls":      daten["ruhepuls"],
+        "schlafdauer_h": daten["schlafdauer_h"],
+        "schlaf_score":  daten["schlaf_score"],
+        "habit_quote":   habit_quote if habit_quote is not None else -1,
+    }
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+    resp = requests.patch(f"{FIRESTORE_BASIS}/tracker/morgenreport", json=body, timeout=15)
+    resp.raise_for_status()
+
+
 def berechne_erholung(daten):
     score = 0
     gruende = []
@@ -223,7 +293,7 @@ def trainingsempfehlung(score):
         return "REGENERATION", "Nur lockeres Gehen, Mobilität oder komplette Pause."
 
 
-def frage_fitness_coach(daten, score, empfehlung):
+def frage_fitness_coach(daten, score, empfehlung, gewohnheiten=None):
     print("Frage Fitness-Coach...")
 
     def w(val, einheit="", na="n/a"):
@@ -257,8 +327,16 @@ GESUNDHEIT:
 - Atemfrequenz: {w(daten['atemfrequenz'], ' Atemzüge/min')}
 
 Automatische Empfehlung: {empfehlung}
+"""
+    if gewohnheiten:
+        ergebnisse, quote = gewohnheiten
+        prompt += "\nGEWOHNHEITEN GESTERN:\n"
+        for name, ok in ergebnisse:
+            prompt += f"- {name}: {'erledigt' if ok else 'nicht erledigt'}\n"
+        if quote is not None:
+            prompt += f"Erfolgsquote: {quote}%\n"
 
-Bitte gib mir eine kurze, persönliche Einschätzung und konkrete Trainingsempfehlung für heute."""
+    prompt += "\nBitte gib mir eine kurze, persönliche Einschätzung und konkrete Trainingsempfehlung für heute. Beziehe die Gewohnheiten mit ein, falls sie einen erkennbaren Zusammenhang zur Erholung zeigen."
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
@@ -274,7 +352,7 @@ def na(val, einheit=""):
     return f"{val}{einheit}" if val is not None else "n/a"
 
 
-def erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort=None):
+def erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort=None, gewohnheiten=None):
     t = "─" * 40
     zeilen = [
         "═" * 40,
@@ -309,6 +387,16 @@ def erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort=None
         f"  SpO2:               {na(daten['spo2'], '%')}",
         f"  Atemfrequenz:       {na(daten['atemfrequenz'], ' /min')}",
         "",
+    ]
+    if gewohnheiten:
+        ergebnisse, quote = gewohnheiten
+        zeilen += ["  GEWOHNHEITEN GESTERN", t]
+        for name, ok in ergebnisse:
+            zeilen.append(f"  {'✔' if ok else '✗'} {name}")
+        if quote is not None:
+            zeilen.append(f"  Erfolgsquote: {quote}%")
+        zeilen.append("")
+    zeilen += [
         t,
         f"  Erholungsscore: {score}/100",
     ]
@@ -370,13 +458,22 @@ def main():
     score, gruende = berechne_erholung(daten)
     empfehlung, details = trainingsempfehlung(score)
 
+    gewohnheiten = None
+    habit_quote = None
+    try:
+        liste = hole_gewohnheiten()
+        ergebnisse, habit_quote = gewohnheiten_gestern(liste)
+        gewohnheiten = (ergebnisse, habit_quote)
+    except Exception as e:
+        print(f"Gewohnheiten konnten nicht geladen werden: {e}")
+
     coach_antwort = None
     try:
-        coach_antwort = frage_fitness_coach(daten, score, empfehlung)
+        coach_antwort = frage_fitness_coach(daten, score, empfehlung, gewohnheiten)
     except Exception as e:
         print(f"Fitness-Coach nicht erreichbar: {e}")
 
-    text = erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort)
+    text = erstelle_text(daten, score, gruende, empfehlung, details, coach_antwort, gewohnheiten)
     print(f"\n{text}\n")
     speichern(text, daten)
 
@@ -389,6 +486,11 @@ def main():
         sende_telegram(text)
     except Exception as e:
         print(f"Telegram-Nachricht konnte nicht gesendet werden: {e}")
+
+    try:
+        schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote)
+    except Exception as e:
+        print(f"Report konnte nicht in Firestore geschrieben werden: {e}")
 
 
 if __name__ == "__main__":
