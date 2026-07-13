@@ -247,17 +247,30 @@ def gewohnheiten_gestern(liste):
     return ergebnisse, quote
 
 
-def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote):
+def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, report_text):
     felder = {
         "datum":         daten["datum"],
         "score":         score,
         "empfehlung":    empfehlung,
+        "report_text":   report_text,
         "body_battery":  daten["body_battery"],
-        "hrv":           daten["hrv"] or 0,
+        "hrv":           daten["hrv"],
         "ruhepuls":      daten["ruhepuls"],
         "schlafdauer_h": daten["schlafdauer_h"],
         "schlaf_score":  daten["schlaf_score"],
-        "habit_quote":   habit_quote if habit_quote is not None else -1,
+        "tief_min":      daten["tief_min"],
+        "rem_min":       daten["rem_min"],
+        "leicht_min":    daten["leicht_min"],
+        "wach_min":      daten["wach_min"],
+        "stress_avg":    daten["stress_avg"],
+        "tr_score":      daten["tr_score"],
+        "tr_level":      daten["tr_level"],
+        "schritte":      daten["schritte"],
+        "int_min_woche": daten["int_min_woche"],
+        "vo2max":        daten["vo2max"],
+        "spo2":          daten["spo2"],
+        "atemfrequenz":  daten["atemfrequenz"],
+        "habit_quote":   habit_quote,
     }
     if not TRACKER_SECRET:
         raise RuntimeError("TRACKER_SECRET nicht gesetzt")
@@ -511,7 +524,7 @@ def main(argv=None):
     print(f"Erfolgreiche Versandkanaele: {', '.join(erfolgreiche_kanaele)}")
 
     try:
-        schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote)
+        schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, text)
     except Exception as e:
         print(f"Report konnte nicht in Firestore geschrieben werden: {e}")
 

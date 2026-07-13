@@ -1,0 +1,28 @@
+openapi: 3.1.0
+info:
+  title: Garmin Morgenreport API
+  version: 1.0.0
+  description: Liefert Geralds aktuellsten Garmin-Morgenreport für den persönlichen Fitnesscoach.
+servers:
+  - url: https://DEINE-WORKER-ADRESSE.workers.dev
+paths:
+  /morgenreport:
+    get:
+      operationId: getAktuellenMorgenreport
+      summary: Aktuellen Morgenreport laden
+      description: Lädt den zuletzt in Firestore gespeicherten Garmin-Morgenreport. Vor einer Tagesanalyse immer aufrufen.
+      responses:
+        "200":
+          description: Der aktuelle Morgenreport
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: object
+                    additionalProperties: true
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig
+        "502":
+          description: Firestore konnte nicht gelesen werden

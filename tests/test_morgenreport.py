@@ -39,6 +39,30 @@ class ArgumentTests(unittest.TestCase):
         self.assertFalse(morgenreport.parse_args([]).dry_run)
 
 
+class FirestoreTests(unittest.TestCase):
+    @patch("morgenreport.requests.patch")
+    def test_vollstaendiger_report_wird_gespeichert(self, patch_request):
+        patch_request.return_value.raise_for_status.return_value = None
+        daten = {
+            "datum": "2026-07-13", "body_battery": 50, "ruhepuls": 55,
+            "schlafdauer_h": 7.0, "schlaf_score": 75, "tief_min": 60,
+            "leicht_min": 240, "rem_min": 90, "wach_min": 20, "hrv": 40,
+            "stress_avg": 30, "schritte": 8000, "spo2": 97,
+            "atemfrequenz": 14, "tr_score": 60, "tr_level": "MEDIUM",
+            "int_min_woche": 80, "vo2max": 45,
+        }
+
+        with patch.object(morgenreport, "TRACKER_SECRET", "secret"):
+            morgenreport.schreibe_morgenreport_firestore(
+                daten, 68, "NORMALES TRAINING", None, "Vollständiger Report"
+            )
+
+        fields = patch_request.call_args.kwargs["json"]["fields"]
+        self.assertEqual(fields["report_text"], {"stringValue": "Vollständiger Report"})
+        self.assertEqual(fields["stress_avg"], {"integerValue": "30"})
+        self.assertEqual(fields["habit_quote"], {"nullValue": None})
+
+
 class MainTests(unittest.TestCase):
     def setUp(self):
         self.daten = {
