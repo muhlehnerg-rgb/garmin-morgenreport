@@ -5,15 +5,18 @@
  * ChatGPT Actions können eine normale HTTPS-API mit einem API-Schlüssel aufrufen,
  * sollen aber weder den internen Firestore-Dokumentnamen noch TRACKER_SECRET
  * kennen. Der Worker hält diese Details serverseitig geheim und gibt nur genau
- * einen lesenden Endpunkt frei. Garmin-, Telegram- oder GitHub-Zugangsdaten werden
- * hier weder benötigt noch gespeichert.
+ * wenige fest definierte Endpunkte frei. Garmin- und Telegram-Zugangsdaten werden
+ * hier weder benötigt noch gespeichert. Der GitHub-Schlüssel wird ausschließlich
+ * als verschlüsseltes Cloudflare-Secret verwendet, um genau einen Workflow zu
+ * starten beziehungsweise dessen Status zu lesen.
  *
  * Datenfluss:
- * morgenreport.py -> Firestore -> dieser Worker -> Fitnesscoach-GPT
+ * Lesen:  morgenreport.py -> Firestore -> dieser Worker -> Fitnesscoach-GPT
+ * Starten: Fitnesscoach-GPT -> dieser Worker -> GitHub Actions -> morgenreport.py
  *
- * Die beiden Werte ACTION_API_KEY und TRACKER_SECRET müssen in Cloudflare als
- * verschlüsselte Secrets angelegt werden. Sie dürfen niemals direkt in dieser
- * Datei, im OpenAPI-Schema oder in Git committed werden.
+ * ACTION_API_KEY, TRACKER_SECRET und GITHUB_ACTIONS_TOKEN müssen in Cloudflare
+ * als verschlüsselte Secrets angelegt werden. Sie dürfen niemals direkt in
+ * dieser Datei, im OpenAPI-Schema oder in Git committed werden.
  */
 
 // Der Projektname ist keine Zugangsinformation. Der geheime Teil des
@@ -22,6 +25,14 @@
 // Klammern; `(default)` liefert hier nachweislich HTTP 404.
 const FIRESTORE_BASE =
   "https://firestore.googleapis.com/v1/projects/gewohnheitstracker-3b30a/databases/default/documents";
+
+// Diese Werte sind keine Geheimnisse: Repository und Workflow sind öffentlich
+// sichtbar. Die feste Konfiguration verhindert, dass ein GPT über freie Parameter
+// beliebige Repositories oder andere Workflows auslösen kann.
+const GITHUB_API_BASE =
+  "https://api.github.com/repos/muhlehnerg-rgb/garmin-morgenreport";
+const GITHUB_WORKFLOW = "morgenreport.yml";
+const GITHUB_API_VERSION = "2026-03-10";
 
 /**
  * Erzeugt für Erfolg und Fehler immer dieselbe saubere JSON-Antwortstruktur.
@@ -57,6 +68,140 @@ function decodeFirestoreValue(value) {
   return null;
 }
 
+/** Prüft den gemeinsamen Bearer-Schlüssel aller GPT-Action-Endpunkte. */
+function isAuthorized(request, env) {
+  const expected = `Bearer ${env.ACTION_API_KEY}`;
+  return Boolean(
+    env.ACTION_API_KEY && request.headers.get("authorization") === expected,
+  );
+}
+
+/**
+ * Erstellt die Header für GitHubs versionierte REST-API.
+ * Der Fine-grained Token erhält ausschließlich Zugriff auf dieses Repository
+ * und die Berechtigung "Actions: read and write".
+ */
+function githubHeaders(env) {
+  return {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+    "content-type": "application/json",
+    "user-agent": "garmin-morgenreport-gpt-worker",
+    "x-github-api-version": GITHUB_API_VERSION,
+  };
+}
+
+/** Liest und decodiert den aktuellsten Report aus dem festen Firestore-Dokument. */
+async function loadMorgenreport(env) {
+  if (!env.TRACKER_SECRET) {
+    return json({ error: "Server configuration incomplete" }, 500);
+  }
+
+  const documentUrl =
+    `${FIRESTORE_BASE}/tracker/morgenreport_${encodeURIComponent(env.TRACKER_SECRET)}`;
+  const firestoreResponse = await fetch(documentUrl, {
+    headers: { accept: "application/json" },
+  });
+
+  if (!firestoreResponse.ok) {
+    return json({ error: "Morgenreport could not be loaded" }, 502);
+  }
+
+  const document = await firestoreResponse.json();
+  const report = Object.fromEntries(
+    Object.entries(document.fields || {}).map(([key, value]) => [
+      key,
+      decodeFirestoreValue(value),
+    ]),
+  );
+  return json({ report });
+}
+
+/**
+ * Startet den bestehenden workflow_dispatch auf dem main-Branch.
+ * `confirmed: true` ist eine zusätzliche technische Hürde. Die GPT-Anweisungen
+ * müssen außerdem verlangen, dass der Benutzer den Start ausdrücklich anfordert,
+ * weil der Lauf Nachrichten versendet und GitHub-Actions-Ressourcen verbraucht.
+ */
+async function startMorgenreport(request, env) {
+  if (!env.GITHUB_ACTIONS_TOKEN) {
+    return json({ error: "Server configuration incomplete" }, 500);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid JSON body" }, 400);
+  }
+  if (body?.confirmed !== true) {
+    return json({ error: "Explicit confirmation required" }, 400);
+  }
+
+  const dispatchResponse = await fetch(
+    `${GITHUB_API_BASE}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`,
+    {
+      method: "POST",
+      headers: githubHeaders(env),
+      body: JSON.stringify({ ref: "main", inputs: { dry_run: false } }),
+    },
+  );
+
+  if (!dispatchResponse.ok) {
+    return json({ error: "Morgenreport workflow could not be started" }, 502);
+  }
+
+  // Aktuelle GitHub-API-Versionen liefern Lauf-ID und URL zurück. Die leere
+  // 204-Antwort älterer Versionen bleibt kompatibel, damit ein API-Rollback den
+  // eigentlichen Start nicht fälschlich als Fehler meldet.
+  let dispatch = {};
+  if (dispatchResponse.status !== 204) {
+    try {
+      dispatch = await dispatchResponse.json();
+    } catch {
+      dispatch = {};
+    }
+  }
+
+  return json(
+    {
+      status: "started",
+      run_id: dispatch.workflow_run_id ?? dispatch.id ?? null,
+      run_url: dispatch.html_url ?? null,
+    },
+    202,
+  );
+}
+
+/** Liefert ausschließlich den Status eines zuvor gestarteten Workflow-Laufs. */
+async function getMorgenreportStatus(url, env) {
+  if (!env.GITHUB_ACTIONS_TOKEN) {
+    return json({ error: "Server configuration incomplete" }, 500);
+  }
+
+  const runId = url.searchParams.get("run_id") || "";
+  if (!/^\d+$/.test(runId)) {
+    return json({ error: "Valid run_id required" }, 400);
+  }
+
+  const runResponse = await fetch(`${GITHUB_API_BASE}/actions/runs/${runId}`, {
+    headers: githubHeaders(env),
+  });
+  if (!runResponse.ok) {
+    return json({ error: "Morgenreport workflow status could not be loaded" }, 502);
+  }
+
+  const run = await runResponse.json();
+  return json({
+    run_id: Number(runId),
+    status: run.status ?? null,
+    conclusion: run.conclusion ?? null,
+    run_url: run.html_url ?? null,
+    created_at: run.created_at ?? null,
+    updated_at: run.updated_at ?? null,
+  });
+}
+
 export default {
   /**
    * Zentraler Request-Handler des Cloudflare Workers.
@@ -68,10 +213,15 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Absichtlich nur eine einzige lesende Route zulassen. Dadurch kann diese
-    // Action keine Garmin-Daten verändern und keine beliebigen Firestore-Pfade
-    // abfragen. Auch POST, PATCH und DELETE enden hier mit 404.
-    if (request.method !== "GET" || url.pathname !== "/morgenreport") {
+    // Nur die drei dokumentierten Kombinationen aus Methode und Pfad zulassen.
+    // Freie Repository-, Workflow-, Firestore- oder Datumsparameter existieren
+    // absichtlich nicht.
+    const isReadRoute = request.method === "GET" && url.pathname === "/morgenreport";
+    const isStartRoute =
+      request.method === "POST" && url.pathname === "/morgenreport/start";
+    const isStatusRoute =
+      request.method === "GET" && url.pathname === "/morgenreport/status";
+    if (!isReadRoute && !isStartRoute && !isStatusRoute) {
       return json({ error: "Not found" }, 404);
     }
 
@@ -79,45 +229,12 @@ export default {
     // hinterlegt. ChatGPT sendet dadurch `Authorization: Bearer <Schlüssel>`.
     // Fehlt das serverseitige Secret oder stimmt der Header nicht exakt überein,
     // werden keinerlei Gesundheitsdaten und keine Konfigurationsdetails geliefert.
-    const expected = `Bearer ${env.ACTION_API_KEY}`;
-    if (!env.ACTION_API_KEY || request.headers.get("authorization") !== expected) {
+    if (!isAuthorized(request, env)) {
       return json({ error: "Unauthorized" }, 401);
     }
 
-    // TRACKER_SECRET bezeichnet das bereits bestehende Firestore-Dokument. Eine
-    // fehlende Konfiguration ist ein Serverfehler und kein "Report nicht gefunden".
-    if (!env.TRACKER_SECRET) {
-      return json({ error: "Server configuration incomplete" }, 500);
-    }
-
-    // encodeURIComponent verhindert, dass ein unerwartetes Zeichen im Secret den
-    // Dokumentpfad verändert. Der vollständige Pfad wird nie an den GPT ausgegeben.
-    const documentUrl =
-      `${FIRESTORE_BASE}/tracker/morgenreport_${encodeURIComponent(env.TRACKER_SECRET)}`;
-
-    // Der Worker liest immer das eine Dokument, das der GitHub-Workflow bei jedem
-    // erfolgreichen Morgenreport überschreibt. Deshalb ist keine Datumsabfrage nötig.
-    const firestoreResponse = await fetch(documentUrl, {
-      headers: { accept: "application/json" },
-    });
-
-    // Firestore-Fehler werden absichtlich verallgemeinert. So gelangen weder der
-    // geheime Dokumentpfad noch interne Google-Fehlermeldungen zum Aufrufer.
-    if (!firestoreResponse.ok) {
-      return json({ error: "Morgenreport could not be loaded" }, 502);
-    }
-
-    const document = await firestoreResponse.json();
-
-    // Nur das fachliche `fields`-Objekt wird zurückgegeben. Firestore-Metadaten wie
-    // Dokumentname, Erstellungszeit und interner Pfad bleiben serverseitig.
-    const report = Object.fromEntries(
-      Object.entries(document.fields || {}).map(([key, value]) => [
-        key,
-        decodeFirestoreValue(value),
-      ]),
-    );
-
-    return json({ report });
+    if (isReadRoute) return loadMorgenreport(env);
+    if (isStartRoute) return startMorgenreport(request, env);
+    return getMorgenreportStatus(url, env);
   },
 };

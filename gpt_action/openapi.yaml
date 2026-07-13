@@ -4,10 +4,10 @@
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
-  version: 1.0.0
+  version: 1.1.0
   description: >-
-    Liefert Geralds aktuellsten Garmin-Morgenreport für den persönlichen
-    Fitnesscoach. Die API ist ausschließlich lesend.
+    Liefert Geralds aktuellsten Garmin-Morgenreport und kann nach ausdrücklicher
+    Benutzerbestätigung den fest konfigurierten GitHub-Workflow starten.
 servers:
   # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
   - url: https://garmin-morgenreport-gpt.muhlehner-g.workers.dev
@@ -95,3 +95,100 @@ paths:
           description: Die Worker-Secrets sind nicht vollständig konfiguriert.
         "502":
           description: Der Worker konnte den aktuellen Datensatz nicht aus Firestore laden.
+  /morgenreport/start:
+    post:
+      operationId: startMorgenreport
+      summary: Neuen Morgenreport starten
+      description: >-
+        Startet den fest konfigurierten GitHub-Actions-Workflow auf main. Diese
+        Aktion kann Telegram- und E-Mail-Nachrichten versenden. Nur aufrufen, wenn
+        Gerald in seiner unmittelbar vorhergehenden Nachricht ausdrücklich verlangt
+        oder bestätigt hat, dass der Morgenreport jetzt gestartet werden soll.
+        Niemals selbstständig aus einer bloßen Analysefrage heraus aufrufen.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmed]
+              properties:
+                confirmed:
+                  type: boolean
+                  enum: [true]
+                  description: >-
+                    Muss true sein und bestätigt, dass Gerald den Start ausdrücklich
+                    verlangt hat. Ohne diese Bestätigung lehnt der Worker den Start ab.
+      responses:
+        "202":
+          description: Der Morgenreport-Workflow wurde gestartet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [started]
+                  run_id:
+                    type: [integer, "null"]
+                    description: GitHub-Lauf-ID für die anschließende Statusabfrage.
+                  run_url:
+                    type: [string, "null"]
+                    format: uri
+        "400":
+          description: JSON ungültig oder ausdrückliche Bestätigung fehlt.
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig.
+        "500":
+          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
+        "502":
+          description: GitHub konnte den Workflow nicht starten.
+  /morgenreport/status:
+    get:
+      operationId: getMorgenreportStatus
+      summary: Status eines gestarteten Morgenreports prüfen
+      description: >-
+        Prüft einen zuvor von startMorgenreport zurückgegebenen GitHub-Lauf. Wenn
+        status completed und conclusion success ist, anschließend
+        getAktuellenMorgenreport aufrufen und dessen Datum kontrollieren.
+      parameters:
+        - name: run_id
+          in: query
+          required: true
+          description: Von startMorgenreport zurückgegebene numerische GitHub-Lauf-ID.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Aktueller Zustand des Workflow-Laufs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, status]
+                properties:
+                  run_id:
+                    type: integer
+                  status:
+                    type: [string, "null"]
+                    description: Typischerweise queued, in_progress oder completed.
+                  conclusion:
+                    type: [string, "null"]
+                    description: Bei Abschluss typischerweise success oder failure.
+                  run_url:
+                    type: [string, "null"]
+                    format: uri
+                  created_at:
+                    type: [string, "null"]
+                  updated_at:
+                    type: [string, "null"]
+        "400":
+          description: run_id fehlt oder ist ungültig.
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig.
+        "500":
+          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
+        "502":
+          description: GitHub konnte den Laufstatus nicht liefern.
