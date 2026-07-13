@@ -32,7 +32,11 @@ jobs:
           STUNDE=$(TZ=Europe/Vienna date +%-H)
           echo "Heute (Wien): $HEUTE, Stunde: $STUNDE"
 
-          if [ -f ".last_sent_date.txt" ] && [ "$(cat .last_sent_date.txt)" = "$HEUTE" ]; then
+          # Der Datumsmarker verhindert nur bei den mehrfach geplanten
+          # Zeitplan-Läufen einen Doppelversand. Ein workflow_dispatch wurde
+          # bewusst manuell ausgelöst und darf deshalb denselben Tagesreport
+          # erneut erzeugen, etwa nach einer Programm- oder Datenkorrektur.
+          if [ "$github_event_name" = "schedule" ] && [ -f ".last_sent_date.txt" ] && [ "$(cat .last_sent_date.txt)" = "$HEUTE" ]; then
             echo "Heute wurde bereits gesendet. Überspringe."
             echo "SKIP=true" >> "$GITHUB_ENV"
           elif [ "$github_event_name" = "schedule" ] && [ "$STUNDE" -lt 9 ]; then
