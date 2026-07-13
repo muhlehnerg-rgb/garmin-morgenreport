@@ -1,3 +1,10 @@
+"""Manueller Diagnose-Start für Garmin-Login und wenige Basisendpunkte.
+
+Dieses Skript ist kein automatisierter Unit-Test. Es hilft lokal zu prüfen, ob
+Zugangsdaten, MFA und Garmin Connect grundsätzlich funktionieren, bevor der
+vollständige Morgenreport untersucht wird. Es versendet und speichert nichts.
+"""
+
 import os
 from datetime import date
 from garminconnect import Garmin
@@ -9,6 +16,7 @@ EMAIL = os.environ.get("GARMIN_EMAIL", "")
 PASSWORD = os.environ.get("GARMIN_PASSWORD", "")
 
 def main():
+    """Meldet sich interaktiv an und zeigt eine kleine, ungefährliche Datenprobe."""
     if not EMAIL or not PASSWORD:
         raise RuntimeError("GARMIN_EMAIL/GARMIN_PASSWORD fehlen in .env")
     print("Verbinde mit Garmin Connect...")

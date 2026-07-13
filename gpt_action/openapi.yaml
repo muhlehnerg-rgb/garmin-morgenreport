@@ -1,28 +1,96 @@
+# Dieses Schema wird im Editor des eigenen Fitnesscoach-GPT unter "Actions"
+# eingefügt. Es enthält absichtlich keine Secrets. Die Authentifizierung wird
+# separat im GPT-Editor als "API key" + "Bearer" konfiguriert.
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
   version: 1.0.0
-  description: Liefert Geralds aktuellsten Garmin-Morgenreport für den persönlichen Fitnesscoach.
+  description: >-
+    Liefert Geralds aktuellsten Garmin-Morgenreport für den persönlichen
+    Fitnesscoach. Die API ist ausschließlich lesend.
 servers:
+  # Nach dem Cloudflare-Deployment durch die echte workers.dev-Adresse ersetzen.
+  # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
   - url: https://DEINE-WORKER-ADRESSE.workers.dev
 paths:
   /morgenreport:
     get:
+      # Eindeutiger Name, über den das GPT diese Funktion intern auswählt.
       operationId: getAktuellenMorgenreport
       summary: Aktuellen Morgenreport laden
-      description: Lädt den zuletzt in Firestore gespeicherten Garmin-Morgenreport. Vor einer Tagesanalyse immer aufrufen.
+      description: >-
+        Lädt den zuletzt in Firestore gespeicherten Garmin-Morgenreport. Vor jeder
+        Tagesanalyse aufrufen. Das zurückgegebene Datum prüfen und deutlich sagen,
+        falls der Report nicht von heute ist. Nullwerte bedeuten "nicht verfügbar"
+        und dürfen nicht als Messwert 0 interpretiert werden.
       responses:
         "200":
-          description: Der aktuelle Morgenreport
+          description: Der aktuelle Morgenreport wurde erfolgreich geladen.
           content:
             application/json:
               schema:
                 type: object
+                required: [report]
                 properties:
                   report:
                     type: object
-                    additionalProperties: true
+                    description: Strukturierte Messwerte und vollständiger Berichtstext.
+                    required: [datum, score, report_text]
+                    properties:
+                      datum:
+                        type: string
+                        description: Datum des Reports im Format YYYY-MM-DD.
+                      score:
+                        type: integer
+                        description: Lokal berechneter Erholungsscore von 0 bis 100.
+                      empfehlung:
+                        type: string
+                        description: Grobe, regelbasierte Trainingskategorie.
+                      report_text:
+                        type: string
+                        description: Vollständiger Text wie beim Telegram-Versand.
+                      body_battery:
+                        type: [integer, "null"]
+                      hrv:
+                        type: [number, "null"]
+                      ruhepuls:
+                        type: [number, "null"]
+                      schlafdauer_h:
+                        type: [number, "null"]
+                      schlaf_score:
+                        type: [number, "null"]
+                      tief_min:
+                        type: [number, "null"]
+                      rem_min:
+                        type: [number, "null"]
+                      leicht_min:
+                        type: [number, "null"]
+                      wach_min:
+                        type: [number, "null"]
+                      stress_avg:
+                        type: [number, "null"]
+                      tr_score:
+                        type: [number, "null"]
+                      tr_level:
+                        type: [string, "null"]
+                      schritte:
+                        type: [integer, "null"]
+                      int_min_woche:
+                        type: [number, "null"]
+                      vo2max:
+                        type: [number, "null"]
+                      spo2:
+                        type: [number, "null"]
+                      atemfrequenz:
+                        type: [number, "null"]
+                      habit_quote:
+                        type: [number, "null"]
+                        description: Erfüllungsquote der berücksichtigten Gewohnheiten in Prozent.
         "401":
-          description: API-Schlüssel fehlt oder ist ungültig
+          description: API-Schlüssel fehlt oder ist ungültig; keine Daten ausgegeben.
+        "404":
+          description: Es wurde eine nicht unterstützte Route aufgerufen.
+        "500":
+          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
         "502":
-          description: Firestore konnte nicht gelesen werden
+          description: Der Worker konnte den aktuellen Datensatz nicht aus Firestore laden.

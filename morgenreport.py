@@ -1,3 +1,14 @@
+"""Erzeugt und verteilt den täglichen Garmin-Morgenreport.
+
+Dieses Modul ist die zentrale Pipeline des Projekts: Es authentifiziert sich bei
+Garmin Connect, normalisiert mehrere Garmin-Endpunkte, ergänzt Gewohnheiten aus
+Firestore, berechnet einen transparenten Erholungsscore und verteilt denselben
+Bericht an Datei, Telegram/E-Mail sowie Firestore für die GPT Action.
+
+Zugangsdaten werden ausschließlich aus Umgebungsvariablen beziehungsweise der
+lokalen, von Git ausgeschlossenen .env-Datei geladen.
+"""
+
 import argparse
 import os
 import sys
@@ -40,6 +51,13 @@ class GarminLoginError(RuntimeError):
 
 
 def login():
+    """Meldet sich bevorzugt mit dem wiederverwendbaren Garmin-Token an.
+
+    Im unbeaufsichtigten GitHub-Workflow darf niemals eine MFA-Eingabe hängen
+    bleiben. Deshalb ist dort ein ungültiges Token ein klarer Fehler. Nur bei
+    einem interaktiven lokalen Start folgt der Fallback auf E-Mail, Passwort und
+    MFA; das erneuerte Token wird anschließend für den nächsten Lauf gespeichert.
+    """
     try:
         client = Garmin()
         client.login(TOKEN_ORDNER)
@@ -70,6 +88,13 @@ def login():
 
 
 def sicher(fn, *args, default=None):
+    """Kapselt optionale Garmin-Endpunkte, ohne den gesamten Report abzubrechen.
+
+    Garmin liefert einzelne Messarten gelegentlich nicht oder ändert deren
+    Verfügbarkeit. Für solche Zusatzwerte ist ein fehlender Wert sinnvoller als
+    der Ausfall des kompletten Morgenreports. Login- und Versandfehler werden
+    dagegen nicht über diese Funktion verschluckt.
+    """
     try:
         return fn(*args)
     except Exception:
@@ -77,6 +102,13 @@ def sicher(fn, *args, default=None):
 
 
 def hole_daten(client):
+    """Lädt Garmin-Messwerte und vereinheitlicht sie in einem flachen Dictionary.
+
+    Schlaf- und Erholungswerte beziehen sich auf heute beziehungsweise die letzte
+    Nacht. Stress und Schritte werden für gestern geladen, weil der heutige Tag am
+    Morgen noch unvollständig wäre. Die flache Struktur ist der gemeinsame Vertrag
+    für Scoreberechnung, Textausgabe, Tests und Firestore.
+    """
     today = date.today().isoformat()
     gestern = (date.today() - timedelta(days=1)).isoformat()
 
@@ -177,6 +209,12 @@ def hole_daten(client):
 
 
 def firestore_wert_lesen(v):
+    """Übersetzt einen typisierten Firestore-REST-Wert rekursiv nach Python.
+
+    Die Tracker-Webapp speichert auch Listen und verschachtelte Maps. Diese
+    Übersetzung hält Firestore-spezifische Typwrapper aus der Gewohnheitslogik.
+    Unbekannte beziehungsweise Null-Typen werden als None behandelt.
+    """
     if "stringValue" in v:
         return v["stringValue"]
     if "integerValue" in v:
@@ -193,6 +231,12 @@ def firestore_wert_lesen(v):
 
 
 def firestore_wert_schreiben(v):
+    """Übersetzt einen Python-Skalar in das Format der Firestore-REST-API.
+
+    bool wird vor int geprüft, weil bool in Python eine Unterklasse von int ist.
+    None bleibt ausdrücklich null, damit fehlende Gesundheitswerte nicht fälschlich
+    als numerische Null beim Fitnesscoach ankommen.
+    """
     if isinstance(v, bool):
         return {"booleanValue": v}
     if isinstance(v, int):
@@ -205,6 +249,12 @@ def firestore_wert_schreiben(v):
 
 
 def hole_gewohnheiten():
+    """Lädt die Tracker-Konfiguration für die Auswertung des Vortags.
+
+    Der Dokumentname ist durch TRACKER_SECRET bestimmt. HTTP-Fehler werden nicht
+    verborgen; main() behandelt Gewohnheiten bewusst als optionale Ergänzung und
+    kann den Garmin-Report auch ohne sie fertigstellen.
+    """
     if not TRACKER_SECRET:
         raise RuntimeError("TRACKER_SECRET nicht gesetzt")
     resp = requests.get(f"{FIRESTORE_BASIS}/tracker/gewohnheiten_{TRACKER_SECRET}", timeout=15)
@@ -215,6 +265,13 @@ def hole_gewohnheiten():
 
 
 def gewohnheiten_gestern(liste):
+    """Bewertet sichtbare Gewohnheiten für gestern und berechnet ihre Erfolgsquote.
+
+    Die Regeln spiegeln die Tracker-Webapp: Überschriften, Trenner und ausgeblendete
+    Elemente zählen nicht. Numerische Gewohnheiten benötigen ein Zielintervall;
+    Haken-Gewohnheiten gelten bei einem wahrheitswertigen Eintrag als erfüllt.
+    Rückgabe ist ``(Anzeigezeilen, Quote)`` für Report und Firestore.
+    """
     # Quote nach derselben Logik wie die Erfolgsrate in der Tracker-Webapp:
     # Haken-Gewohnheiten plus Zahl-Gewohnheiten mit Min/Max-Ziel,
     # jeweils nur wenn "In Erfolgsrate einbeziehen" nicht deaktiviert ist.
@@ -248,6 +305,25 @@ def gewohnheiten_gestern(liste):
 
 
 def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, report_text):
+    """Speichert den neuesten vollständigen Report für Dashboard und GPT Action.
+
+    Es wird absichtlich immer dasselbe Firestore-Dokument überschrieben. Der
+    Fitnesscoach benötigt den aktuellen Tageszustand und keine frei abfragbare
+    Gesundheitsdaten-Historie. Dadurch bleibt auch die externe Action klein: Sie
+    muss weder Datum noch Dokument-ID vom GPT entgegennehmen.
+
+    Neben den Einzelwerten wird ``report_text`` gespeichert. Die Einzelwerte sind
+    für strukturierte Auswertungen geeignet; der Text bewahrt Hinweise,
+    Formatierung und Gewohnheiten genau so, wie sie per Telegram versendet wurden.
+    Fehlende Messwerte bleiben als Firestore ``null`` erhalten. Sie werden nicht
+    künstlich zu 0 oder -1 gemacht, weil ein Coach "nicht gemessen" sonst als
+    echten Messwert missverstehen könnte.
+
+    TRACKER_SECRET kommt ausschließlich aus .env beziehungsweise GitHub Secrets.
+    Es darf nicht als Klartext in Quellcode, Tests oder Fehlermeldungen erscheinen.
+    """
+    # Die Feldnamen bilden zugleich den stabilen Vertrag zur GPT Action. Beim
+    # Umbenennen eines Feldes deshalb auch gpt_action/openapi.yaml aktualisieren.
     felder = {
         "datum":         daten["datum"],
         "score":         score,
@@ -274,12 +350,28 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     }
     if not TRACKER_SECRET:
         raise RuntimeError("TRACKER_SECRET nicht gesetzt")
+
+    # Die Firestore-REST-API erwartet pro Wert einen expliziten Typ. Die zentrale
+    # Hilfsfunktion hält diese technische Darstellung aus der Fachlogik heraus.
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+
+    # PATCH aktualisiert das feste "aktueller Report"-Dokument. Ein Timeout
+    # verhindert, dass ein gestörter Firestore-Aufruf den Workflow endlos blockiert.
     resp = requests.patch(f"{FIRESTORE_BASIS}/tracker/morgenreport_{TRACKER_SECRET}", json=body, timeout=15)
+
+    # HTTP-Fehler müssen sichtbar werden; andernfalls könnte der Workflow Erfolg
+    # melden, obwohl der GPT am nächsten Morgen noch veraltete Daten erhält.
     resp.raise_for_status()
 
 
 def berechne_erholung(daten):
+    """Berechnet einen einfachen, nachvollziehbaren Erholungsscore von 0 bis 100.
+
+    Das ist bewusst ein regelbasiertes Orientierungssignal und keine medizinische
+    Bewertung. Body Battery, Schlaf, HRV, Stress und Training Readiness liefern
+    gewichtete Teilpunkte. Auffällige Bereiche werden zusätzlich als verständliche
+    Hinweise zurückgegeben, damit die Zahl nicht ohne Begründung steht.
+    """
     score = 0
     gruende = []
 
@@ -353,6 +445,11 @@ def berechne_erholung(daten):
 
 
 def trainingsempfehlung(score):
+    """Ordnet den Score einer groben Trainingskategorie für das Dashboard zu.
+
+    Diese Kategorie ersetzt keine subjektive Einschätzung zu Schmerz, Muskelkater
+    oder Krankheit. Der eigene Fitnesscoach soll diese Faktoren zusätzlich erfragen.
+    """
     if score >= 75:
         return "VOLLES TRAINING", "Alle geplanten Einheiten wie vorgesehen."
     elif score >= 55:
@@ -364,10 +461,17 @@ def trainingsempfehlung(score):
 
 
 def na(val, einheit=""):
+    """Formatiert vorhandene Werte und kennzeichnet fehlende Werte als ``n/a``."""
     return f"{val}{einheit}" if val is not None else "n/a"
 
 
 def erstelle_text(daten, score, gruende, gewohnheiten=None):
+    """Baut den kanonischen Klartextbericht für alle Ausgabekanäle.
+
+    Derselbe Text wird lokal gespeichert, per Telegram/E-Mail gesendet und als
+    ``report_text`` in Firestore abgelegt. Dadurch analysiert der GPT genau den
+    Bericht, den der Benutzer morgens tatsächlich gesehen hat.
+    """
     t = "─" * 40
     zeilen = [
         "═" * 40,
@@ -424,6 +528,7 @@ def erstelle_text(daten, score, gruende, gewohnheiten=None):
 
 
 def speichern(text, daten):
+    """Speichert eine lokale, nach Datum benannte Kopie zur Nachvollziehbarkeit."""
     ordner = os.path.join(BASE_DIR, "reports")
     os.makedirs(ordner, exist_ok=True)
     dateiname = os.path.join(ordner, f"report_{daten['datum']}.txt")
@@ -433,6 +538,12 @@ def speichern(text, daten):
 
 
 def sende_email(text, daten):
+    """Versendet den Bericht optional über Gmail mit einem App-Passwort.
+
+    Normale Gmail-Passwörter gehören ausdrücklich nicht in dieses Projekt. Fehlt
+    die vollständige optionale Konfiguration, meldet die Funktion einen Fehler,
+    den main() isoliert behandelt, sodass Telegram weiterhin funktionieren kann.
+    """
     if not GMAIL_ADRESSE or not GMAIL_APP_PASSWORT or not EMPFAENGER:
         raise RuntimeError("GMAIL_ADRESSE/GMAIL_APP_PASSWORT/MORGENREPORT_EMPFAENGER nicht vollstaendig")
     nachricht = MIMEText(text, "plain", "utf-8")
@@ -447,6 +558,12 @@ def sende_email(text, daten):
 
 
 def sende_telegram(text):
+    """Versendet den Bericht robust in Telegram-kompatiblen Teilnachrichten.
+
+    Telegram begrenzt Nachrichten auf 4096 Zeichen; 4000 lässt etwas Reserve.
+    Sowohl HTTP-Status als auch das Telegram-eigene ``ok`` werden geprüft, damit
+    ein API-Fehler nicht irrtümlich als erfolgreicher Versand gilt.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID nicht gesetzt")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -466,6 +583,7 @@ def sende_telegram(text):
 
 
 def parse_args(argv=None):
+    """Definiert CLI-Optionen separat, damit sie ohne echten Start testbar sind."""
     parser = argparse.ArgumentParser(description="Garmin-Morgenreport erstellen und versenden")
     parser.add_argument(
         "--dry-run",
@@ -476,6 +594,12 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    """Orchestriert einen vollständigen Reportlauf und gibt bei Erfolg 0 zurück.
+
+    Ein lokaler Report wird immer erzeugt. Im Dry-Run endet die Pipeline vor allen
+    externen Schreib- und Versandaktionen. Im Normalbetrieb muss mindestens ein
+    Versandkanal erfolgreich sein; erst danach wird der GPT-Datensatz aktualisiert.
+    """
     args = parse_args(argv)
     print("Verbinde mit Garmin Connect...")
     client = login()
@@ -523,6 +647,10 @@ def main(argv=None):
 
     print(f"Erfolgreiche Versandkanaele: {', '.join(erfolgreiche_kanaele)}")
 
+    # Firestore wird erst nach mindestens einem erfolgreichen Versand aktualisiert.
+    # So erscheint im Fitnesscoach kein Report, dessen eigentlicher Tagesversand
+    # vollständig fehlgeschlagen ist. Ein Firestore-Fehler verhindert den bereits
+    # erfolgreichen Telegram-Versand jedoch nicht nachträglich.
     try:
         schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, text)
     except Exception as e:
