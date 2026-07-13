@@ -9,9 +9,8 @@ info:
     Liefert Geralds aktuellsten Garmin-Morgenreport für den persönlichen
     Fitnesscoach. Die API ist ausschließlich lesend.
 servers:
-  # Nach dem Cloudflare-Deployment durch die echte workers.dev-Adresse ersetzen.
   # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
-  - url: https://DEINE-WORKER-ADRESSE.workers.dev
+  - url: https://garmin-morgenreport-gpt.muhlehner-g.workers.dev
 paths:
   /morgenreport:
     get:

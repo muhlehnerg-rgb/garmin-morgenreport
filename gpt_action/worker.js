@@ -18,8 +18,10 @@
 
 // Der Projektname ist keine Zugangsinformation. Der geheime Teil des
 // Dokumentpfads wird erst weiter unten aus env.TRACKER_SECRET zusammengesetzt.
+// Dieses Projekt akzeptiert in der REST-URL die Datenbank-ID `default` ohne
+// Klammern; `(default)` liefert hier nachweislich HTTP 404.
 const FIRESTORE_BASE =
-  "https://firestore.googleapis.com/v1/projects/gewohnheitstracker-3b30a/databases/(default)/documents";
+  "https://firestore.googleapis.com/v1/projects/gewohnheitstracker-3b30a/databases/default/documents";
 
 /**
  * Erzeugt für Erfolg und Fehler immer dieselbe saubere JSON-Antwortstruktur.
