@@ -34,7 +34,9 @@ paths:
                   report:
                     type: object
                     description: Strukturierte Messwerte und vollständiger Berichtstext.
-                    required: [datum, score, report_text]
+                    # Alte, bereits vor Einführung der GPT Action geschriebene
+                    # Dokumente enthalten eventuell noch keinen report_text.
+                    required: [datum, score]
                     properties:
                       datum:
                         type: string
