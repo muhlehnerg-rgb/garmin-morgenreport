@@ -8,6 +8,12 @@ on:
     - cron: "30 9 * * *"
     - cron: "0 10 * * *"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Nur testen, nichts versenden"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -46,15 +52,38 @@ jobs:
         if: env.SKIP != 'true'
         run: pip install -r requirements.txt
 
+      - name: Verschluesselten Garmin-Tokenstand suchen
+        if: env.SKIP != 'true'
+        id: garmin-token-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .garmin_tokens.enc
+          key: garmin-tokens-${{ github.run_id }}
+          restore-keys: |
+            garmin-tokens-
+
       - name: Garmin-Tokens wiederherstellen
         if: env.SKIP != 'true'
+        env:
+          GARMIN_TOKENS_B64: ${{ secrets.GARMIN_TOKENS_B64 }}
         run: |
           mkdir -p .garmin_tokens
-          echo "${{ secrets.GARMIN_TOKENS_B64 }}" | base64 -d > .garmin_tokens/garmin_tokens.json
+          if [ -s .garmin_tokens.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -in .garmin_tokens.enc \
+              -out .garmin_tokens/garmin_tokens.json \
+              -pass env:GARMIN_TOKENS_B64
+            echo "Aktualisierten Tokenstand aus dem verschluesselten Cache geladen."
+          else
+            printf '%s' "$GARMIN_TOKENS_B64" | base64 -d > .garmin_tokens/garmin_tokens.json
+            echo "Tokenstand erstmals aus GARMIN_TOKENS_B64 geladen."
+          fi
+          test -s .garmin_tokens/garmin_tokens.json
 
       - name: Morgenreport ausführen
         if: env.SKIP != 'true'
         env:
+          DRY_RUN: ${{ inputs.dry_run }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -64,10 +93,33 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
-        run: python morgenreport.py
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python morgenreport.py --dry-run
+          else
+            python morgenreport.py
+          fi
+
+      - name: Aktualisierte Garmin-Tokens verschluesseln
+        if: env.SKIP != 'true' && success()
+        env:
+          GARMIN_TOKENS_B64: ${{ secrets.GARMIN_TOKENS_B64 }}
+        run: |
+          test -s .garmin_tokens/garmin_tokens.json
+          openssl enc -aes-256-cbc -salt -pbkdf2 \
+            -in .garmin_tokens/garmin_tokens.json \
+            -out .garmin_tokens.enc \
+            -pass env:GARMIN_TOKENS_B64
+
+      - name: Aktualisierten Garmin-Tokenstand speichern
+        if: env.SKIP != 'true' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: .garmin_tokens.enc
+          key: garmin-tokens-${{ github.run_id }}
 
       - name: Heutiges Datum als "gesendet" markieren
-        if: env.SKIP != 'true'
+        if: env.SKIP != 'true' && success() && inputs.dry_run != true
         run: |
           TZ=Europe/Vienna date +%Y-%m-%d > .last_sent_date.txt
           git config user.name "Morgenreport Bot"

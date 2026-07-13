@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import smtplib
@@ -5,6 +6,10 @@ import requests
 from email.mime.text import MIMEText
 from datetime import date, timedelta
 from garminconnect import Garmin
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # Windows-Konsolen sind oft nicht UTF-8; ohne das crasht print() an ═/✔-Zeichen
 try:
@@ -12,12 +17,12 @@ try:
 except Exception:
     pass
 
-EMAIL = os.environ.get("GARMIN_EMAIL", "muhlehner.g@gmail.com")
+EMAIL = os.environ.get("GARMIN_EMAIL", "")
 PASSWORD = os.environ.get("GARMIN_PASSWORD", "")
 
-GMAIL_ADRESSE = os.environ.get("GMAIL_ADRESSE", "muhlehner.g@gmail.com")
+GMAIL_ADRESSE = os.environ.get("GMAIL_ADRESSE", "")
 GMAIL_APP_PASSWORT = os.environ.get("GMAIL_APP_PASSWORT", "")
-EMPFAENGER = os.environ.get("MORGENREPORT_EMPFAENGER", "muhlehner.g@gmail.com")
+EMPFAENGER = os.environ.get("MORGENREPORT_EMPFAENGER", "")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -27,7 +32,11 @@ FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJ
 # Zugangsschlüssel: Teil der Dokumentpfade, ohne ihn verweigern die Firestore-Regeln jeden Zugriff
 TRACKER_SECRET = os.environ.get("TRACKER_SECRET", "")
 
-TOKEN_ORDNER = os.path.join(os.path.dirname(__file__), ".garmin_tokens")
+TOKEN_ORDNER = os.path.join(BASE_DIR, ".garmin_tokens")
+
+
+class GarminLoginError(RuntimeError):
+    """Garmin-Anmeldung konnte nicht ohne Benutzereingabe abgeschlossen werden."""
 
 
 def login():
@@ -35,11 +44,29 @@ def login():
         client = Garmin()
         client.login(TOKEN_ORDNER)
         return client
-    except Exception:
-        client = Garmin(EMAIL, PASSWORD, prompt_mfa=lambda: input("Garmin MFA-Code: "))
-        client.login()
-        client.client.dump(TOKEN_ORDNER)
-        return client
+    except Exception as token_fehler:
+        if os.environ.get("GITHUB_ACTIONS") == "true" or not sys.stdin.isatty():
+            raise GarminLoginError(
+                "Garmin-Token ungueltig oder abgelaufen. "
+                "Lokal neu anmelden und GARMIN_TOKENS_B64 aktualisieren."
+            ) from token_fehler
+
+        if not EMAIL or not PASSWORD:
+            raise GarminLoginError(
+                "GARMIN_EMAIL/GARMIN_PASSWORD fehlen in der lokalen .env-Datei."
+            ) from token_fehler
+
+        print("Gespeichertes Garmin-Token ist ungueltig; starte lokale Anmeldung.")
+        try:
+            client = Garmin(EMAIL, PASSWORD, prompt_mfa=lambda: input("Garmin MFA-Code: ").strip())
+            client.login()
+            os.makedirs(TOKEN_ORDNER, exist_ok=True)
+            client.client.dump(TOKEN_ORDNER)
+            return client
+        except Exception as login_fehler:
+            raise GarminLoginError(
+                "Garmin-Anmeldung fehlgeschlagen. MFA-Code und Zugangsdaten pruefen."
+            ) from login_fehler
 
 
 def sicher(fn, *args, default=None):
@@ -384,7 +411,7 @@ def erstelle_text(daten, score, gruende, gewohnheiten=None):
 
 
 def speichern(text, daten):
-    ordner = os.path.join(os.path.dirname(__file__), "reports")
+    ordner = os.path.join(BASE_DIR, "reports")
     os.makedirs(ordner, exist_ok=True)
     dateiname = os.path.join(ordner, f"report_{daten['datum']}.txt")
     with open(dateiname, "w", encoding="utf-8") as f:
@@ -393,6 +420,8 @@ def speichern(text, daten):
 
 
 def sende_email(text, daten):
+    if not GMAIL_ADRESSE or not GMAIL_APP_PASSWORT or not EMPFAENGER:
+        raise RuntimeError("GMAIL_ADRESSE/GMAIL_APP_PASSWORT/MORGENREPORT_EMPFAENGER nicht vollstaendig")
     nachricht = MIMEText(text, "plain", "utf-8")
     nachricht["Subject"] = f"Morgenreport {daten['datum']}"
     nachricht["From"] = GMAIL_ADRESSE
@@ -411,11 +440,30 @@ def sende_telegram(text):
     # Telegram erlaubt max. 4096 Zeichen pro Nachricht -> in Teile aufsplitten
     for i in range(0, len(text), 4000):
         teil = text[i:i + 4000]
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": teil})
+        resp = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": teil},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        antwort = resp.json()
+        if not antwort.get("ok"):
+            raise RuntimeError(f"Telegram API meldet Fehler: {antwort.get('description', 'unbekannt')}")
     print("Telegram-Nachricht gesendet.")
 
 
-def main():
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Garmin-Morgenreport erstellen und versenden")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report erstellen und lokal speichern, aber nichts versenden oder in Firestore schreiben",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     print("Verbinde mit Garmin Connect...")
     client = login()
     print("OK\n")
@@ -438,21 +486,44 @@ def main():
     print(f"\n{text}\n")
     speichern(text, daten)
 
+    if args.dry_run:
+        print("TESTMODUS: E-Mail, Telegram und Firestore wurden uebersprungen.")
+        return 0
+
+    erfolgreiche_kanaele = []
     try:
         sende_email(text, daten)
+        erfolgreiche_kanaele.append("E-Mail")
     except Exception as e:
         print(f"E-Mail konnte nicht gesendet werden: {e}")
 
     try:
         sende_telegram(text)
+        erfolgreiche_kanaele.append("Telegram")
     except Exception as e:
         print(f"Telegram-Nachricht konnte nicht gesendet werden: {e}")
+
+    if not erfolgreiche_kanaele:
+        raise RuntimeError(
+            "Morgenreport wurde lokal erstellt, aber kein Versandkanal war erfolgreich."
+        )
+
+    print(f"Erfolgreiche Versandkanaele: {', '.join(erfolgreiche_kanaele)}")
 
     try:
         schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote)
     except Exception as e:
         print(f"Report konnte nicht in Firestore geschrieben werden: {e}")
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except GarminLoginError as e:
+        print(f"FEHLER: {e}", file=sys.stderr)
+        raise SystemExit(2)
+    except Exception as e:
+        print(f"FEHLER: {e}", file=sys.stderr)
+        raise SystemExit(1)

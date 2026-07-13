@@ -1,4 +1,6 @@
 .garmin_tokens/
+.garmin_tokens.enc
+.env
 reports/
-morgenreport_starten.bat
 __pycache__/
+*.pyc
