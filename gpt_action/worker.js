@@ -14,7 +14,7 @@
  * Lesen:  morgenreport.py -> Firestore -> dieser Worker -> Fitnesscoach-GPT
  * Starten: Fitnesscoach-GPT -> dieser Worker -> GitHub Actions -> morgenreport.py
  *
- * ACTION_API_KEY, TRACKER_SECRET und GITHUB_ACTIONS_TOKEN müssen in Cloudflare
+ * ACTION_API_KEY, TRACKER_SECRET und GITHUB_ACTIONS_TOKEN_V2 müssen in Cloudflare
  * als verschlüsselte Secrets angelegt werden. Sie dürfen niemals direkt in
  * dieser Datei, im OpenAPI-Schema oder in Git committed werden.
  */
@@ -84,7 +84,7 @@ function isAuthorized(request, env) {
 function githubHeaders(env) {
   return {
     accept: "application/vnd.github+json",
-    authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+    authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN_V2}`,
     "content-type": "application/json",
     "user-agent": "garmin-morgenreport-gpt-worker",
     "x-github-api-version": GITHUB_API_VERSION,
@@ -124,7 +124,7 @@ async function loadMorgenreport(env) {
  * weil der Lauf Nachrichten versendet und GitHub-Actions-Ressourcen verbraucht.
  */
 async function startMorgenreport(request, env) {
-  if (!env.GITHUB_ACTIONS_TOKEN) {
+  if (!env.GITHUB_ACTIONS_TOKEN_V2) {
     return json({ error: "Server configuration incomplete" }, 500);
   }
 
@@ -175,7 +175,7 @@ async function startMorgenreport(request, env) {
 
 /** Liefert ausschließlich den Status eines zuvor gestarteten Workflow-Laufs. */
 async function getMorgenreportStatus(url, env) {
-  if (!env.GITHUB_ACTIONS_TOKEN) {
+  if (!env.GITHUB_ACTIONS_TOKEN_V2) {
     return json({ error: "Server configuration incomplete" }, 500);
   }
 

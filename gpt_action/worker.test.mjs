@@ -13,7 +13,7 @@ const { default: worker } = await import(
 const env = {
   ACTION_API_KEY: "test-action-key",
   TRACKER_SECRET: "test-tracker-key",
-  GITHUB_ACTIONS_TOKEN: "test-github-key",
+  GITHUB_ACTIONS_TOKEN_V2: "test-github-key",
 };
 const authHeaders = {
   authorization: `Bearer ${env.ACTION_API_KEY}`,

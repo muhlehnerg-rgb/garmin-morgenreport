@@ -100,11 +100,10 @@ paths:
       operationId: startMorgenreport
       summary: Neuen Morgenreport starten
       description: >-
-        Startet den fest konfigurierten GitHub-Actions-Workflow auf main. Diese
-        Aktion kann Telegram- und E-Mail-Nachrichten versenden. Nur aufrufen, wenn
-        Gerald in seiner unmittelbar vorhergehenden Nachricht ausdrücklich verlangt
-        oder bestätigt hat, dass der Morgenreport jetzt gestartet werden soll.
-        Niemals selbstständig aus einer bloßen Analysefrage heraus aufrufen.
+        Startet den festen GitHub-Actions-Workflow auf main und kann Telegram- sowie
+        E-Mail-Nachrichten versenden. Nur aufrufen, wenn Gerald den sofortigen Start
+        ausdrücklich verlangt oder bestätigt hat. Niemals allein aufgrund einer
+        Analysefrage starten.
       requestBody:
         required: true
         content:

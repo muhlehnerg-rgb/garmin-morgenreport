@@ -52,7 +52,7 @@ GitHub-Datei speichern:
   Bearer-Authentifizierung eingetragen.
 - `TRACKER_SECRET`: bestehender Wert, mit dem der Worker das richtige
   Firestore-Dokument findet. Dieser Wert wird niemals im GPT hinterlegt.
-- `GITHUB_ACTIONS_TOKEN`: Fine-grained Personal Access Token, eingeschränkt auf
+- `GITHUB_ACTIONS_TOKEN_V2`: Fine-grained Personal Access Token, eingeschränkt auf
   das Repository `garmin-morgenreport` und **Actions: Read and write**. Der Token
   wird nur vom Worker an GitHub gesendet und niemals im GPT hinterlegt.
 
@@ -68,7 +68,7 @@ Ein Widerruf von `ACTION_API_KEY` beeinträchtigt den Morgenreport-Versand nicht
 4. Unter **Repository permissions** ausschließlich **Actions: Read and write**
    aktivieren. Automatisch erforderliche Metadaten-Leserechte bleiben bestehen.
 5. Token erzeugen und unmittelbar als Cloudflare-Secret
-   `GITHUB_ACTIONS_TOKEN` eintragen.
+   `GITHUB_ACTIONS_TOKEN_V2` eintragen.
 6. Den Token nicht in Chat, Notizen, `.env`, GitHub Secrets oder Quellcode kopieren.
 
 Nach Ablauf oder Widerruf kann der GPT weiterhin vorhandene Reports lesen; nur

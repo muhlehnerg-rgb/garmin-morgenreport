@@ -7,7 +7,7 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 ## Nicht verhandelbare Sicherheitsregeln
 
 - Niemals `.env`, Garmin-Tokens, Telegram-Tokens, `TRACKER_SECRET`,
-  `ACTION_API_KEY`, `GITHUB_ACTIONS_TOKEN` oder GitHub Secrets ausgeben oder
+  `ACTION_API_KEY`, `GITHUB_ACTIONS_TOKEN_V2` oder GitHub Secrets ausgeben oder
   committen.
 - Secrets weder zum Debuggen in Exceptions noch in URLs, Screenshots oder Tests
   anzeigen. In Beispielen ausschließlich erkennbare Platzhalter verwenden.
