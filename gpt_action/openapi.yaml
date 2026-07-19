@@ -4,7 +4,7 @@
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
-  version: 1.1.0
+  version: 1.2.0
   description: >-
     Liefert Geralds aktuellsten Garmin-Morgenreport und kann nach ausdrücklicher
     Benutzerbestätigung den fest konfigurierten GitHub-Workflow starten.
@@ -87,6 +87,39 @@ paths:
                       habit_quote:
                         type: [number, "null"]
                         description: Erfüllungsquote der berücksichtigten Gewohnheiten in Prozent.
+                      aktivitaeten_gestern:
+                        type: array
+                        description: >-
+                          Alle von Garmin für den Vortag gelieferten Aktivitäten,
+                          unabhängig von ihrem Aktivitätstyp. Nicht verfügbare
+                          Messwerte bleiben null.
+                        items:
+                          type: object
+                          required: [name, typ]
+                          properties:
+                            name:
+                              type: string
+                            typ:
+                              type: string
+                              description: Garmins technischer Aktivitätstyp.
+                            startzeit:
+                              type: [string, "null"]
+                            dauer_min:
+                              type: [number, "null"]
+                            distanz_km:
+                              type: [number, "null"]
+                            kalorien:
+                              type: [number, "null"]
+                            durchschnittspuls:
+                              type: [number, "null"]
+                            maximalpuls:
+                              type: [number, "null"]
+                            hoehenmeter:
+                              type: [number, "null"]
+                            trainingseffekt_aerob:
+                              type: [number, "null"]
+                            trainingseffekt_anaerob:
+                              type: [number, "null"]
         "401":
           description: API-Schlüssel fehlt oder ist ungültig; keine Daten ausgegeben.
         "404":

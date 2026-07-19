@@ -101,6 +101,79 @@ def sicher(fn, *args, default=None):
         return default
 
 
+def _aktivitaetszahl(value, divisor=1, nachkommastellen=0):
+    """Normalisiert optionale Garmin-Zahlen ohne fehlende Werte zu 0 zu machen.
+
+    Garmin liefert Aktivitätswerte je nach Endpunkt als ``int``, ``float`` oder
+    gelegentlich als numerischen String. Ungültige beziehungsweise fehlende Werte
+    bleiben ``None``. Das ist wichtig, weil etwa eine fehlende Distanz bei
+    Krafttraining nicht als tatsächlich zurückgelegte Distanz von 0 km erscheinen
+    soll.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        ergebnis = float(value) / divisor
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if nachkommastellen == 0:
+        return round(ergebnis)
+    return round(ergebnis, nachkommastellen)
+
+
+def normalisiere_aktivitaeten(aktivitaeten):
+    """Reduziert beliebige Garmin-Aktivitäten auf stabile, relevante Felder.
+
+    Es wird absichtlich kein Aktivitätstyp gefiltert. Laufen, Radfahren, Wandern,
+    Krafttraining, Yoga und Garmins sonstige Typen durchlaufen dieselbe Logik.
+    Felder, die bei einem Typ nicht existieren, bleiben ``None`` und der restliche
+    Eintrag bleibt trotzdem im Morgenreport erhalten.
+    """
+    normalisiert = []
+    if not isinstance(aktivitaeten, list):
+        return normalisiert
+
+    for aktivitaet in aktivitaeten:
+        if not isinstance(aktivitaet, dict):
+            continue
+
+        typ_daten = aktivitaet.get("activityType") or {}
+        if isinstance(typ_daten, dict):
+            typ = typ_daten.get("typeKey") or typ_daten.get("typeId")
+        else:
+            typ = typ_daten
+        typ = str(typ) if typ is not None else "unbekannt"
+
+        name = aktivitaet.get("activityName") or typ.replace("_", " ").title()
+        normalisiert.append({
+            "name": str(name),
+            "typ": typ,
+            "startzeit": aktivitaet.get("startTimeLocal"),
+            "dauer_min": _aktivitaetszahl(aktivitaet.get("duration"), 60, 0),
+            "distanz_km": _aktivitaetszahl(aktivitaet.get("distance"), 1000, 2),
+            "kalorien": _aktivitaetszahl(aktivitaet.get("calories"), 1, 0),
+            "durchschnittspuls": _aktivitaetszahl(aktivitaet.get("averageHR"), 1, 0),
+            "maximalpuls": _aktivitaetszahl(aktivitaet.get("maxHR"), 1, 0),
+            "hoehenmeter": _aktivitaetszahl(aktivitaet.get("elevationGain"), 1, 0),
+            "trainingseffekt_aerob": _aktivitaetszahl(
+                aktivitaet.get("aerobicTrainingEffect"), 1, 1
+            ),
+            "trainingseffekt_anaerob": _aktivitaetszahl(
+                aktivitaet.get("anaerobicTrainingEffect"), 1, 1
+            ),
+        })
+
+    # Älteste Aktivität zuerst ergibt im Morgenreport einen natürlichen Tagesablauf.
+    normalisiert.sort(key=lambda eintrag: eintrag.get("startzeit") or "")
+    return normalisiert
+
+
+def hole_aktivitaeten(client, tag):
+    """Lädt alle Aktivitäten eines Tages ohne Garmins optionalen Typfilter."""
+    roh = sicher(client.get_activities_by_date, tag, tag, default=[])
+    return normalisiere_aktivitaeten(roh)
+
+
 def hole_daten(client):
     """Lädt Garmin-Messwerte und vereinheitlicht sie in einem flachen Dictionary.
 
@@ -122,6 +195,7 @@ def hole_daten(client):
     readiness  = sicher(client.get_training_readiness, today, default={})
     intensity  = sicher(client.get_weekly_intensity_minutes, today, default={})
     metrics    = sicher(client.get_max_metrics, today, default=[])
+    aktivitaeten_gestern = hole_aktivitaeten(client, gestern)
 
     # Schlaf
     sleep_dto      = sleep.get("dailySleepDTO", {})
@@ -205,6 +279,7 @@ def hole_daten(client):
         "tr_level":       tr_level,
         "int_min_woche":  int_min_woche,
         "vo2max":         vo2max,
+        "aktivitaeten_gestern": aktivitaeten_gestern,
     }
 
 
@@ -231,11 +306,12 @@ def firestore_wert_lesen(v):
 
 
 def firestore_wert_schreiben(v):
-    """Übersetzt einen Python-Skalar in das Format der Firestore-REST-API.
+    """Übersetzt Python-Werte rekursiv in das Format der Firestore-REST-API.
 
     bool wird vor int geprüft, weil bool in Python eine Unterklasse von int ist.
     None bleibt ausdrücklich null, damit fehlende Gesundheitswerte nicht fälschlich
-    als numerische Null beim Fitnesscoach ankommen.
+    als numerische Null beim Fitnesscoach ankommen. Listen und Maps werden für die
+    typunabhängige Aktivitätsliste benötigt.
     """
     if isinstance(v, bool):
         return {"booleanValue": v}
@@ -245,6 +321,14 @@ def firestore_wert_schreiben(v):
         return {"doubleValue": v}
     if v is None:
         return {"nullValue": None}
+    if isinstance(v, list):
+        return {"arrayValue": {"values": [firestore_wert_schreiben(x) for x in v]}}
+    if isinstance(v, dict):
+        return {
+            "mapValue": {
+                "fields": {k: firestore_wert_schreiben(wert) for k, wert in v.items()}
+            }
+        }
     return {"stringValue": str(v)}
 
 
@@ -347,6 +431,7 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
         "spo2":          daten["spo2"],
         "atemfrequenz":  daten["atemfrequenz"],
         "habit_quote":   habit_quote,
+        "aktivitaeten_gestern": daten.get("aktivitaeten_gestern", []),
     }
     if not TRACKER_SECRET:
         raise RuntimeError("TRACKER_SECRET nicht gesetzt")
@@ -465,6 +550,41 @@ def na(val, einheit=""):
     return f"{val}{einheit}" if val is not None else "n/a"
 
 
+def formatiere_aktivitaet(aktivitaet):
+    """Erzeugt kompakte Reportzeilen für einen beliebigen Garmin-Aktivitätstyp."""
+    typ = (aktivitaet.get("typ") or "unbekannt").replace("_", " ").title()
+    name = aktivitaet.get("name") or typ
+    startzeit = aktivitaet.get("startzeit")
+    uhrzeit = None
+    if isinstance(startzeit, str):
+        # Garmin verwendet typischerweise ``YYYY-MM-DD HH:MM:SS``; die Behandlung
+        # von ``T`` hält die Ausgabe auch für ISO-ähnliche Antworten stabil.
+        zeitanteil = startzeit.replace("T", " ").split(" ")[-1]
+        if len(zeitanteil) >= 5 and ":" in zeitanteil:
+            uhrzeit = zeitanteil[:5]
+
+    titel = f"  • {name} [{typ}]"
+    if uhrzeit:
+        titel += f" um {uhrzeit}"
+
+    details = []
+    for feld, einheit, bezeichnung in (
+        ("dauer_min", " min", "Dauer"),
+        ("distanz_km", " km", "Distanz"),
+        ("kalorien", " kcal", "Kalorien"),
+        ("durchschnittspuls", " bpm", "Ø Puls"),
+        ("maximalpuls", " bpm", "Max. Puls"),
+        ("hoehenmeter", " Hm", "Anstieg"),
+        ("trainingseffekt_aerob", "", "TE aerob"),
+        ("trainingseffekt_anaerob", "", "TE anaerob"),
+    ):
+        wert = aktivitaet.get(feld)
+        if wert is not None:
+            details.append(f"{bezeichnung}: {wert}{einheit}")
+
+    return [titel] + (["    " + " | ".join(details)] if details else [])
+
+
 def erstelle_text(daten, score, gruende, gewohnheiten=None):
     """Baut den kanonischen Klartextbericht für alle Ausgabekanäle.
 
@@ -500,6 +620,16 @@ def erstelle_text(daten, score, gruende, gewohnheiten=None):
         f"  Schritte gestern:   {na(daten['schritte'])}",
         f"  Intensitätsmin/Wo:  {na(daten['int_min_woche'])}",
         f"  VO2 Max:            {na(daten['vo2max'])}",
+        "",
+    ]
+    zeilen += ["  AKTIVITÄTEN GESTERN", t]
+    aktivitaeten = daten.get("aktivitaeten_gestern") or []
+    if aktivitaeten:
+        for aktivitaet in aktivitaeten:
+            zeilen.extend(formatiere_aktivitaet(aktivitaet))
+    else:
+        zeilen.append("  Keine Aktivitäten aufgezeichnet.")
+    zeilen += [
         "",
         "  GESUNDHEIT",
         t,

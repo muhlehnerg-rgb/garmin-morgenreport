@@ -21,7 +21,7 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 
 ## Relevanter Datenfluss
 
-1. `morgenreport.py` liest Garmin und Gewohnheiten.
+1. `morgenreport.py` liest Garmin, alle Aktivitäten des Vortags ohne Typfilter und Gewohnheiten.
 2. `erstelle_text()` erzeugt denselben vollständigen Bericht für Datei, Telegram
    und Firestore.
 3. `schreibe_morgenreport_firestore()` überschreibt das feste Dokument für den
@@ -34,6 +34,8 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 
 - Änderungen am Firestore-Datenmodell immer synchron in Python, Worker,
   OpenAPI-Schema und Tests durchführen.
+- `aktivitaeten_gestern` bleibt eine typunabhängige Liste. Unbekannte oder neue
+  Garmin-Aktivitätstypen dürfen nicht herausgefiltert werden.
 - `operationId: getAktuellenMorgenreport` stabil halten, da GPT-Anweisungen darauf
   Bezug nehmen können.
 - Auch `startMorgenreport` und `getMorgenreportStatus` stabil halten. Der Start

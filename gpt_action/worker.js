@@ -55,9 +55,9 @@ function json(body, status = 200) {
  * wie `{ "body_battery": 42 }`. Diese Funktion übersetzt genau die Datentypen,
  * die morgenreport.py aktuell schreibt.
  *
- * Wenn später Arrays, Maps oder Zeitstempel in Firestore ergänzt werden, muss
- * diese Funktion entsprechend erweitert und getestet werden. Unbekannte Typen
- * werden bewusst zu null, damit keine rohe Firestore-Interna ausgegeben wird.
+ * Arrays und Maps werden für die Liste der gestrigen Aktivitäten rekursiv
+ * decodiert. Unbekannte Typen werden bewusst zu null, damit keine rohe
+ * Firestore-Interna ausgegeben wird.
  */
 function decodeFirestoreValue(value) {
   if ("stringValue" in value) return value.stringValue;
@@ -65,6 +65,17 @@ function decodeFirestoreValue(value) {
   if ("doubleValue" in value) return value.doubleValue;
   if ("booleanValue" in value) return value.booleanValue;
   if ("nullValue" in value) return null;
+  if ("arrayValue" in value) {
+    return (value.arrayValue.values || []).map(decodeFirestoreValue);
+  }
+  if ("mapValue" in value) {
+    return Object.fromEntries(
+      Object.entries(value.mapValue.fields || {}).map(([key, nestedValue]) => [
+        key,
+        decodeFirestoreValue(nestedValue),
+      ]),
+    );
+  }
   return null;
 }
 

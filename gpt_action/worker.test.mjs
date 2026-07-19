@@ -154,6 +154,21 @@ test("Leseroute decodiert weiterhin den Firestore-Bericht", async () => {
       score: { integerValue: "68" },
       hrv: { doubleValue: 59.5 },
       spo2: { nullValue: null },
+      aktivitaeten_gestern: {
+        arrayValue: {
+          values: [{
+            mapValue: {
+              fields: {
+                name: { stringValue: "Morgenlauf" },
+                typ: { stringValue: "running" },
+                dauer_min: { integerValue: "42" },
+                distanz_km: { doubleValue: 7.5 },
+                hoehenmeter: { nullValue: null },
+              },
+            },
+          }],
+        },
+      },
     },
   });
   try {
@@ -163,7 +178,19 @@ test("Leseroute decodiert weiterhin den Firestore-Bericht", async () => {
     );
     assert.equal(response.status, 200);
     assert.deepEqual(await responseJson(response), {
-      report: { datum: "2026-07-13", score: 68, hrv: 59.5, spo2: null },
+      report: {
+        datum: "2026-07-13",
+        score: 68,
+        hrv: 59.5,
+        spo2: null,
+        aktivitaeten_gestern: [{
+          name: "Morgenlauf",
+          typ: "running",
+          dauer_min: 42,
+          distanz_km: 7.5,
+          hoehenmeter: null,
+        }],
+      },
     });
   } finally {
     globalThis.fetch = originalFetch;

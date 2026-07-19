@@ -1,6 +1,6 @@
 # Garmin-Morgenreport
 
-Erstellt morgens einen Report aus Garmin-Connect-Daten, speichert ihn lokal und versendet ihn per E-Mail und/oder Telegram. Optional werden Gewohnheiten aus Firestore gelesen und die Dashboard-Kachel aktualisiert.
+Erstellt morgens einen Report aus Garmin-Connect-Daten, speichert ihn lokal und versendet ihn per E-Mail und/oder Telegram. Der Report enthält alle von Garmin erfassten Aktivitäten des Vortags ohne Typfilter, beispielsweise Wandern, Laufen, Radfahren, Krafttraining oder Yoga. Optional werden Gewohnheiten aus Firestore gelesen und die Dashboard-Kachel aktualisiert.
 
 ## Lokale Einrichtung
 

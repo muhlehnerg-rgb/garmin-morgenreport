@@ -39,6 +39,77 @@ class ArgumentTests(unittest.TestCase):
         self.assertFalse(morgenreport.parse_args([]).dry_run)
 
 
+class AktivitaetsTests(unittest.TestCase):
+    def test_alle_aktivitaetstypen_werden_geladen_und_normalisiert(self):
+        client = Mock()
+        client.get_activities_by_date.return_value = [
+            {
+                "activityName": "Abendliches Krafttraining",
+                "activityType": {"typeKey": "strength_training"},
+                "startTimeLocal": "2026-07-18 18:30:00",
+                "duration": 3600,
+                "calories": 410,
+                "averageHR": 118,
+            },
+            {
+                "activityName": "Morgenwanderung",
+                "activityType": {"typeKey": "hiking"},
+                "startTimeLocal": "2026-07-18 07:15:00",
+                "duration": 5400,
+                "distance": 10250,
+                "calories": 620,
+                "averageHR": 126,
+                "maxHR": 154,
+                "elevationGain": 480.4,
+                "aerobicTrainingEffect": 3.2,
+            },
+            {
+                "activityName": "Unbekannte neue Garmin-Sportart",
+                "activityType": {"typeKey": "future_activity_type"},
+                "startTimeLocal": "2026-07-18 20:00:00",
+            },
+        ]
+
+        aktivitaeten = morgenreport.hole_aktivitaeten(client, "2026-07-18")
+
+        client.get_activities_by_date.assert_called_once_with("2026-07-18", "2026-07-18")
+        self.assertEqual([a["typ"] for a in aktivitaeten], [
+            "hiking", "strength_training", "future_activity_type"
+        ])
+        self.assertEqual(aktivitaeten[0]["distanz_km"], 10.25)
+        self.assertEqual(aktivitaeten[0]["hoehenmeter"], 480)
+        self.assertIsNone(aktivitaeten[1]["distanz_km"])
+        self.assertEqual(aktivitaeten[2]["name"], "Unbekannte neue Garmin-Sportart")
+
+    def test_report_listet_auch_aktivitaeten_ohne_distanz(self):
+        daten = {
+            "datum": "2026-07-19", "body_battery": 60, "ruhepuls": 52,
+            "schlafdauer_h": 8.0, "schlaf_score": 80, "tief_min": 70,
+            "leicht_min": 260, "rem_min": 100, "wach_min": 15, "hrv": 50,
+            "stress_avg": 25, "schritte": 9000, "spo2": 97,
+            "atemfrequenz": 14, "tr_score": 72, "tr_level": "HIGH",
+            "int_min_woche": 120, "vo2max": 46,
+            "aktivitaeten_gestern": [
+                {
+                    "name": "Krafttraining", "typ": "strength_training",
+                    "startzeit": "2026-07-18 18:30:00", "dauer_min": 60,
+                    "distanz_km": None, "kalorien": 410,
+                    "durchschnittspuls": 118, "maximalpuls": None,
+                    "hoehenmeter": None, "trainingseffekt_aerob": 2.1,
+                    "trainingseffekt_anaerob": 1.4,
+                }
+            ],
+        }
+
+        text = morgenreport.erstelle_text(daten, 70, [])
+
+        self.assertIn("AKTIVITÄTEN GESTERN", text)
+        self.assertIn("Krafttraining [Strength Training] um 18:30", text)
+        self.assertIn("Dauer: 60 min", text)
+        self.assertIn("Kalorien: 410 kcal", text)
+        self.assertNotIn("Distanz: 0", text)
+
+
 class FirestoreTests(unittest.TestCase):
     @patch("morgenreport.requests.patch")
     def test_vollstaendiger_report_wird_gespeichert(self, patch_request):
@@ -50,6 +121,10 @@ class FirestoreTests(unittest.TestCase):
             "stress_avg": 30, "schritte": 8000, "spo2": 97,
             "atemfrequenz": 14, "tr_score": 60, "tr_level": "MEDIUM",
             "int_min_woche": 80, "vo2max": 45,
+            "aktivitaeten_gestern": [{
+                "name": "Morgenlauf", "typ": "running", "dauer_min": 42,
+                "distanz_km": 7.5, "kalorien": 500, "startzeit": None,
+            }],
         }
 
         with patch.object(morgenreport, "TRACKER_SECRET", "secret"):
@@ -61,6 +136,15 @@ class FirestoreTests(unittest.TestCase):
         self.assertEqual(fields["report_text"], {"stringValue": "Vollständiger Report"})
         self.assertEqual(fields["stress_avg"], {"integerValue": "30"})
         self.assertEqual(fields["habit_quote"], {"nullValue": None})
+        aktivitaet = fields["aktivitaeten_gestern"]["arrayValue"]["values"][0]
+        self.assertEqual(
+            aktivitaet["mapValue"]["fields"]["name"],
+            {"stringValue": "Morgenlauf"},
+        )
+        self.assertEqual(
+            aktivitaet["mapValue"]["fields"]["distanz_km"],
+            {"doubleValue": 7.5},
+        )
 
 
 class MainTests(unittest.TestCase):

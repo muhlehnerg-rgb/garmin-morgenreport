@@ -39,6 +39,8 @@ starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
 - `worker.test.mjs`: isolierte Tests für Authentifizierung, Bestätigung,
   GitHub-Aufrufe, Statusfilterung und Firestore-Decodierung.
 - `../morgenreport.py`: schreibt Einzelwerte und `report_text` in Firestore.
+  `aktivitaeten_gestern` enthält zusätzlich alle von Garmin gelieferten
+  Aktivitäten des Vortags als strukturierte Liste, ohne Typfilter.
 - `../tests/test_morgenreport.py`: schützt den Firestore-Datenvertrag vor
   unbeabsichtigten Änderungen.
 
@@ -124,6 +126,10 @@ Wenn Firestore-Felder ergänzt oder umbenannt werden, diese Stellen gemeinsam ä
 2. `decodeFirestoreValue()` in `worker.js`, falls ein neuer Datentyp hinzukommt
 3. Antwortschema in `openapi.yaml`
 4. Tests in `tests/test_morgenreport.py` und `gpt_action/worker.test.mjs`
+
+Die Aktivitätsliste verwendet Firestore-Arrays und verschachtelte Maps. Neue
+Garmin-Aktivitätstypen werden nicht einzeln freigeschaltet: Solange Garmin sie im
+Tagesabruf liefert, müssen sie ohne Filter in `aktivitaeten_gestern` erscheinen.
 
 Nach Änderungen zuerst `python -m unittest discover -s tests -v` und
 `node --test --test-isolation=none gpt_action/worker.test.mjs` ausführen. Die
