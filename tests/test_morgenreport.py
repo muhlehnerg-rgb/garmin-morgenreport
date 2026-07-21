@@ -38,6 +38,12 @@ class ArgumentTests(unittest.TestCase):
         self.assertTrue(morgenreport.parse_args(["--dry-run"]).dry_run)
         self.assertFalse(morgenreport.parse_args([]).dry_run)
 
+    def test_heutige_aktivitaeten_argument(self):
+        self.assertTrue(
+            morgenreport.parse_args(["--heutige-aktivitaeten"]).heutige_aktivitaeten
+        )
+        self.assertFalse(morgenreport.parse_args([]).heutige_aktivitaeten)
+
 
 class AktivitaetsTests(unittest.TestCase):
     def test_alle_aktivitaetstypen_werden_geladen_und_normalisiert(self):
@@ -145,6 +151,47 @@ class FirestoreTests(unittest.TestCase):
             aktivitaet["mapValue"]["fields"]["distanz_km"],
             {"doubleValue": 7.5},
         )
+        self.assertEqual(fields["aktivitaeten_heute"], {"arrayValue": {"values": []}})
+        self.assertEqual(
+            fields["aktivitaeten_heute_datum"], {"stringValue": "2026-07-13"}
+        )
+        self.assertEqual(
+            fields["aktivitaeten_heute_aktualisiert_am"], {"nullValue": None}
+        )
+
+    @patch("morgenreport.requests.patch")
+    def test_abendaktualisierung_aendert_nur_heutige_aktivitaetsfelder(self, patch_request):
+        patch_request.return_value.raise_for_status.return_value = None
+        aktivitaeten = [{"name": "Abendlauf", "typ": "running", "distanz_km": 5.2}]
+
+        with patch.object(morgenreport, "TRACKER_SECRET", "secret"), \
+             patch("morgenreport.ZoneInfo", return_value=None), \
+             patch("morgenreport.datetime") as datetime_mock:
+            datetime_mock.now.return_value.isoformat.return_value = "2026-07-21T20:15:00+02:00"
+            zeitpunkt = morgenreport.schreibe_heutige_aktivitaeten_firestore(
+                "2026-07-21", aktivitaeten
+            )
+
+        self.assertEqual(zeitpunkt, "2026-07-21T20:15:00+02:00")
+        self.assertEqual(
+            patch_request.call_args.kwargs["params"],
+            [
+                ("updateMask.fieldPaths", "aktivitaeten_heute"),
+                ("updateMask.fieldPaths", "aktivitaeten_heute_datum"),
+                ("updateMask.fieldPaths", "aktivitaeten_heute_aktualisiert_am"),
+            ],
+        )
+        fields = patch_request.call_args.kwargs["json"]["fields"]
+        self.assertEqual(set(fields), {
+            "aktivitaeten_heute",
+            "aktivitaeten_heute_datum",
+            "aktivitaeten_heute_aktualisiert_am",
+        })
+        self.assertEqual(
+            fields["aktivitaeten_heute"]["arrayValue"]["values"][0]
+            ["mapValue"]["fields"]["name"],
+            {"stringValue": "Abendlauf"},
+        )
 
 
 class MainTests(unittest.TestCase):
@@ -206,6 +253,29 @@ class MainTests(unittest.TestCase):
             morgenreport.main([])
 
         firestore.assert_not_called()
+
+    @patch("morgenreport.hole_daten")
+    @patch("morgenreport.sende_telegram")
+    @patch("morgenreport.sende_email")
+    @patch("morgenreport.speichern")
+    @patch("morgenreport.schreibe_heutige_aktivitaeten_firestore")
+    @patch("morgenreport.hole_aktivitaeten")
+    @patch("morgenreport.login")
+    def test_abendmodus_laesst_report_und_versand_unberuehrt(
+        self, login, hole_aktivitaeten, schreibe_heute, speichern,
+        sende_email, sende_telegram, hole_daten
+    ):
+        hole_aktivitaeten.return_value = [{"name": "Radfahrt", "typ": "cycling"}]
+        schreibe_heute.return_value = "2026-07-21T20:15:00+02:00"
+
+        self.assertEqual(morgenreport.main(["--heutige-aktivitaeten"]), 0)
+
+        hole_aktivitaeten.assert_called_once()
+        schreibe_heute.assert_called_once()
+        hole_daten.assert_not_called()
+        speichern.assert_not_called()
+        sende_email.assert_not_called()
+        sende_telegram.assert_not_called()
 
 
 if __name__ == "__main__":

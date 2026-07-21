@@ -14,6 +14,11 @@ on:
         required: false
         type: boolean
         default: false
+      activities_only:
+        description: "Nur heutige Aktivitäten für die GPT-Abendabfrage aktualisieren"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -88,6 +93,7 @@ jobs:
         if: env.SKIP != 'true'
         env:
           DRY_RUN: ${{ inputs.dry_run }}
+          ACTIVITIES_ONLY: ${{ inputs.activities_only }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -98,7 +104,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
         run: |
-          if [ "$DRY_RUN" = "true" ]; then
+          if [ "$ACTIVITIES_ONLY" = "true" ] && [ "$DRY_RUN" = "true" ]; then
+            python morgenreport.py --heutige-aktivitaeten --dry-run
+          elif [ "$ACTIVITIES_ONLY" = "true" ]; then
+            python morgenreport.py --heutige-aktivitaeten
+          elif [ "$DRY_RUN" = "true" ]; then
             python morgenreport.py --dry-run
           else
             python morgenreport.py
@@ -123,7 +133,9 @@ jobs:
           key: garmin-tokens-${{ github.run_id }}
 
       - name: Heutiges Datum als "gesendet" markieren
-        if: env.SKIP != 'true' && success() && inputs.dry_run != true
+        # Ein reiner Aktivitätsabruf versendet keinen Morgenreport und darf daher
+        # auch nicht den Marker für einen erfolgreichen Tagesversand verändern.
+        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true
         run: |
           TZ=Europe/Vienna date +%Y-%m-%d > .last_sent_date.txt
           git config user.name "Morgenreport Bot"

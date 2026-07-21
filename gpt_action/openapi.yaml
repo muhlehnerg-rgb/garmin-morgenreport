@@ -4,7 +4,7 @@
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
-  version: 1.2.0
+  version: 1.3.0
   description: >-
     Liefert Geralds aktuellsten Garmin-Morgenreport und kann nach ausdrücklicher
     Benutzerbestätigung den fest konfigurierten GitHub-Workflow starten.
@@ -120,6 +120,18 @@ paths:
                               type: [number, "null"]
                             trainingseffekt_anaerob:
                               type: [number, "null"]
+                      aktivitaeten_heute:
+                        type: array
+                        description: >-
+                          Beim letzten Abendabruf gespeicherte Aktivitäten des
+                          heutigen Tages. Für Aktualität zusätzlich Datum und
+                          Zeitstempel prüfen.
+                        items:
+                          $ref: "#/components/schemas/Aktivitaet"
+                      aktivitaeten_heute_datum:
+                        type: [string, "null"]
+                      aktivitaeten_heute_aktualisiert_am:
+                        type: [string, "null"]
         "401":
           description: API-Schlüssel fehlt oder ist ungültig; keine Daten ausgegeben.
         "404":
@@ -177,19 +189,101 @@ paths:
           description: Das GitHub-Secret ist im Worker nicht konfiguriert.
         "502":
           description: GitHub konnte den Workflow nicht starten.
+  /aktivitaeten/heute:
+    get:
+      operationId: getHeutigeAktivitaeten
+      summary: Zuletzt aktualisierte Aktivitäten von heute laden
+      description: >-
+        Liefert die separat gespeicherten Garmin-Aktivitäten des heutigen Tages.
+        Immer datum und aktualisiert_am nennen. Ein leeres Array bedeutet nur,
+        dass beim angegebenen Aktualisierungszeitpunkt keine Aktivität geliefert
+        wurde. Wenn Gerald ausdrücklich aktuelle Daten wünscht, zuerst seine
+        Bestätigung einholen, startHeutigeAktivitaetenAktualisierung aufrufen,
+        den Laufstatus prüfen und danach diese Funktion erneut aufrufen.
+      responses:
+        "200":
+          description: Heutige Aktivitätsdaten aus dem letzten Abendabruf.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [datum, aktualisiert_am, aktivitaeten]
+                properties:
+                  datum:
+                    type: [string, "null"]
+                    description: Garmin-Tag der Aktivitäten im Format YYYY-MM-DD.
+                  aktualisiert_am:
+                    type: [string, "null"]
+                    description: Zeitpunkt des letzten Abrufs in der Zeitzone Europe/Vienna.
+                  aktivitaeten:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Aktivitaet"
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig.
+        "500":
+          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
+        "502":
+          description: Der Worker konnte den Datensatz nicht aus Firestore laden.
+  /aktivitaeten/heute/start:
+    post:
+      operationId: startHeutigeAktivitaetenAktualisierung
+      summary: Heutige Garmin-Aktivitäten aktualisieren
+      description: >-
+        Startet den festen GitHub-Workflow im reinen Aktivitätsmodus. Dieser Lauf
+        liest nur die heutigen Garmin-Aktivitäten und aktualisiert Firestore; er
+        versendet weder Telegram noch E-Mail. Nur nach ausdrücklicher Bestätigung
+        von Gerald aufrufen.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmed]
+              properties:
+                confirmed:
+                  type: boolean
+                  enum: [true]
+      responses:
+        "202":
+          description: Die Aktualisierung wurde gestartet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [started]
+                  run_id:
+                    type: [integer, "null"]
+                  run_url:
+                    type: [string, "null"]
+                    format: uri
+        "400":
+          description: JSON ungültig oder ausdrückliche Bestätigung fehlt.
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig.
+        "500":
+          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
+        "502":
+          description: GitHub konnte den Workflow nicht starten.
   /morgenreport/status:
     get:
       operationId: getMorgenreportStatus
-      summary: Status eines gestarteten Morgenreports prüfen
+      summary: Status eines gestarteten Garmin-Workflows prüfen
       description: >-
-        Prüft einen zuvor von startMorgenreport zurückgegebenen GitHub-Lauf. Wenn
-        status completed und conclusion success ist, anschließend
-        getAktuellenMorgenreport aufrufen und dessen Datum kontrollieren.
+        Prüft einen zuvor von einer der beiden Startfunktionen zurückgegebenen
+        GitHub-Lauf. Wenn status completed und conclusion success ist, danach die
+        zum Start passende Lesefunktion aufrufen: getAktuellenMorgenreport für den
+        Morgenreport oder getHeutigeAktivitaeten für die Abendaktualisierung.
       parameters:
         - name: run_id
           in: query
           required: true
-          description: Von startMorgenreport zurückgegebene numerische GitHub-Lauf-ID.
+          description: Von der verwendeten Startfunktion zurückgegebene numerische GitHub-Lauf-ID.
           schema:
             type: integer
       responses:
@@ -224,3 +318,32 @@ paths:
           description: Das GitHub-Secret ist im Worker nicht konfiguriert.
         "502":
           description: GitHub konnte den Laufstatus nicht liefern.
+components:
+  schemas:
+    Aktivitaet:
+      type: object
+      required: [name, typ]
+      properties:
+        name:
+          type: string
+        typ:
+          type: string
+          description: Garmins technischer Aktivitätstyp; es wird kein Typ gefiltert.
+        startzeit:
+          type: [string, "null"]
+        dauer_min:
+          type: [number, "null"]
+        distanz_km:
+          type: [number, "null"]
+        kalorien:
+          type: [number, "null"]
+        durchschnittspuls:
+          type: [number, "null"]
+        maximalpuls:
+          type: [number, "null"]
+        hoehenmeter:
+          type: [number, "null"]
+        trainingseffekt_aerob:
+          type: [number, "null"]
+        trainingseffekt_anaerob:
+          type: [number, "null"]

@@ -15,7 +15,8 @@ import sys
 import smtplib
 import requests
 from email.mime.text import MIMEText
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from garminconnect import Garmin
 from dotenv import load_dotenv
 
@@ -432,6 +433,12 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
         "atemfrequenz":  daten["atemfrequenz"],
         "habit_quote":   habit_quote,
         "aktivitaeten_gestern": daten.get("aktivitaeten_gestern", []),
+        # Beim neuen Morgenreport werden mögliche Abenddaten des Vortags bewusst
+        # geleert. Dadurch kann der Fitnesscoach nie alte Aktivitäten irrtümlich
+        # als Aktivitäten des neuen Tages ausgeben.
+        "aktivitaeten_heute": [],
+        "aktivitaeten_heute_datum": daten["datum"],
+        "aktivitaeten_heute_aktualisiert_am": None,
     }
     if not TRACKER_SECRET:
         raise RuntimeError("TRACKER_SECRET nicht gesetzt")
@@ -447,6 +454,35 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     # HTTP-Fehler müssen sichtbar werden; andernfalls könnte der Workflow Erfolg
     # melden, obwohl der GPT am nächsten Morgen noch veraltete Daten erhält.
     resp.raise_for_status()
+
+
+def schreibe_heutige_aktivitaeten_firestore(tag, aktivitaeten):
+    """Aktualisiert ausschließlich die heutigen Aktivitäten im Report-Dokument.
+
+    Dieser getrennte Schreibweg ist für die Abendabfrage des Fitnesscoach-GPT
+    gedacht. Ein Firestore-Update-Mask begrenzt den PATCH ausdrücklich auf drei
+    Felder. Schlaf, Erholungsscore, Gewohnheiten und der morgens versendete Text
+    bleiben dadurch unverändert, und es wird keine zweite Nachricht verschickt.
+    """
+    if not TRACKER_SECRET:
+        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
+
+    aktualisiert_am = datetime.now(ZoneInfo("Europe/Vienna")).isoformat(timespec="seconds")
+    felder = {
+        "aktivitaeten_heute": aktivitaeten,
+        "aktivitaeten_heute_datum": tag,
+        "aktivitaeten_heute_aktualisiert_am": aktualisiert_am,
+    }
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+    params = [("updateMask.fieldPaths", feldname) for feldname in felder]
+    resp = requests.patch(
+        f"{FIRESTORE_BASIS}/tracker/morgenreport_{TRACKER_SECRET}",
+        params=params,
+        json=body,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return aktualisiert_am
 
 
 def berechne_erholung(daten):
@@ -720,6 +756,11 @@ def parse_args(argv=None):
         action="store_true",
         help="Report erstellen und lokal speichern, aber nichts versenden oder in Firestore schreiben",
     )
+    parser.add_argument(
+        "--heutige-aktivitaeten",
+        action="store_true",
+        help="Nur heutige Garmin-Aktivitaeten für die GPT-Abendabfrage aktualisieren",
+    )
     return parser.parse_args(argv)
 
 
@@ -734,6 +775,24 @@ def main(argv=None):
     print("Verbinde mit Garmin Connect...")
     client = login()
     print("OK\n")
+
+    # Der Abendmodus hat absichtlich einen sehr kurzen Datenfluss: Garmin lesen
+    # und drei abgegrenzte Firestore-Felder aktualisieren. Er erzeugt weder einen
+    # Report noch E-Mail/Telegram-Nachrichten oder einen Versandmarker.
+    if args.heutige_aktivitaeten:
+        heute = date.today().isoformat()
+        print(f"Lade Garmin-Aktivitaeten fuer heute ({heute})...")
+        aktivitaeten = hole_aktivitaeten(client, heute)
+        if args.dry_run:
+            print(f"TESTMODUS: {len(aktivitaeten)} Aktivitaet(en) geladen; Firestore uebersprungen.")
+            return 0
+        aktualisiert_am = schreibe_heutige_aktivitaeten_firestore(heute, aktivitaeten)
+        print(
+            f"Heutige Aktivitaeten aktualisiert: {len(aktivitaeten)} "
+            f"Eintrag/Eintraege ({aktualisiert_am})."
+        )
+        return 0
+
     print("Lade Garmin-Daten...")
     daten = hole_daten(client)
     score, gruende = berechne_erholung(daten)

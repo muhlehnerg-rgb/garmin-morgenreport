@@ -14,8 +14,9 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 - Die GPT Action darf ausschließlich den fest verdrahteten Morgenreport-Workflow
   starten und dessen Status lesen. Keine freien Repository-, Workflow- oder
   Firestore-Pfade und keine sonstigen GitHub-Schreibaktionen hinzufügen.
-- `startMorgenreport` benötigt `confirmed: true` und darf laut GPT-Anweisungen nur
-  nach ausdrücklicher Benutzeraufforderung verwendet werden.
+- `startMorgenreport` und `startHeutigeAktivitaetenAktualisierung` benötigen
+  `confirmed: true` und dürfen laut GPT-Anweisungen nur nach ausdrücklicher
+  Benutzeraufforderung verwendet werden.
 - Fehlende Gesundheitswerte als `None`/`null` erhalten, niemals zu 0 umdeuten.
 - Keine bestehende Änderung des Benutzers verwerfen und nie mit Force pushen.
 
@@ -29,6 +30,9 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 4. `gpt_action/worker.js` authentifiziert den GPT per Bearer-Schlüssel, liest das
    feste Dokument, startet den festen Workflow und filtert dessen Statusantwort.
 5. `gpt_action/openapi.yaml` beschreibt die Lese-, Start- und Status-Actions.
+6. Im Abendmodus liest `morgenreport.py --heutige-aktivitaeten` nur den heutigen
+   Garmin-Tag und aktualisiert per Firestore-Update-Mask ausschließlich
+   `aktivitaeten_heute`, dessen Datum und dessen Aktualisierungszeit.
 
 ## Änderungsregeln
 
@@ -36,10 +40,15 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
   OpenAPI-Schema und Tests durchführen.
 - `aktivitaeten_gestern` bleibt eine typunabhängige Liste. Unbekannte oder neue
   Garmin-Aktivitätstypen dürfen nicht herausgefiltert werden.
+- Dasselbe gilt für `aktivitaeten_heute`. Der Abendmodus darf keinen Report
+  versenden und keinen `.last_sent_date.txt`-Marker schreiben.
 - `operationId: getAktuellenMorgenreport` stabil halten, da GPT-Anweisungen darauf
   Bezug nehmen können.
 - Auch `startMorgenreport` und `getMorgenreportStatus` stabil halten. Der Start
   muss fest auf `main` und `.github/workflows/morgenreport.yml` begrenzt bleiben.
+- `getHeutigeAktivitaeten` und `startHeutigeAktivitaetenAktualisierung` ebenfalls
+  stabil halten. Auch dieser Start verwendet ausschließlich denselben festen
+  Workflow mit dem booleschen `activities_only`-Eingang.
 - Keine medizinischen Diagnosen in die technische Pipeline einbauen. Die Daten
   und regelbasierte Empfehlung werden geliefert; die Coach-Kommunikation gehört
   in die Anweisungen des eigenen GPT.

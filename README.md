@@ -27,6 +27,21 @@ python morgenreport.py --dry-run
 
 Der Testmodus liest Garmin-Daten und speichert den Report lokal. E-Mail, Telegram und Firestore werden nicht aufgerufen.
 
+## Heutige Aktivitäten am Abend aktualisieren
+
+Der getrennte Abendmodus liest ausschließlich die Aktivitäten des heutigen Tages
+und aktualisiert dafür drei Felder im bestehenden Firestore-Dokument. Er erstellt
+keinen zweiten Morgenreport, versendet weder Telegram noch E-Mail und verändert
+keinen Versandmarker:
+
+```powershell
+python morgenreport.py --heutige-aktivitaeten
+```
+
+Der Fitnesscoach-GPT kann denselben Modus nach ausdrücklicher Bestätigung über
+seine Action starten. Nach Abschluss kann er die heutigen Aktivitäten samt Datum
+und Aktualisierungszeit abrufen und direkt auswerten.
+
 ## GitHub Actions
 
 Erforderliche Repository-Secrets:

@@ -93,12 +93,38 @@ test("bestaetigter Start ruft nur den festen Morgenreport-Workflow auf", async (
     assert.equal(capturedOptions.headers.authorization, "Bearer test-github-key");
     assert.deepEqual(JSON.parse(capturedOptions.body), {
       ref: "main",
-      inputs: { dry_run: false },
+      inputs: { dry_run: false, activities_only: false },
     });
     assert.deepEqual(await responseJson(response), {
       status: "started",
       run_id: 12345,
       run_url: "https://github.com/example/actions/runs/12345",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("bestaetigter Abendstart aktiviert nur den Aktivitaetsmodus", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedOptions;
+  globalThis.fetch = async (_url, options) => {
+    capturedOptions = options;
+    return Response.json({ workflow_run_id: 67890 });
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.example/aktivitaeten/heute/start", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ confirmed: true }),
+      }),
+      env,
+    );
+    assert.equal(response.status, 202);
+    assert.deepEqual(JSON.parse(capturedOptions.body), {
+      ref: "main",
+      inputs: { dry_run: false, activities_only: true },
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -191,6 +217,41 @@ test("Leseroute decodiert weiterhin den Firestore-Bericht", async () => {
           hoehenmeter: null,
         }],
       },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Abend-Leseroute gibt nur heutige Aktivitaeten und Aktualisierungszeit aus", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    fields: {
+      datum: { stringValue: "2026-07-21" },
+      score: { integerValue: "72" },
+      aktivitaeten_heute_datum: { stringValue: "2026-07-21" },
+      aktivitaeten_heute_aktualisiert_am: {
+        stringValue: "2026-07-21T20:15:00+02:00",
+      },
+      aktivitaeten_heute: {
+        arrayValue: { values: [{ mapValue: { fields: {
+          name: { stringValue: "Abendlauf" },
+          typ: { stringValue: "running" },
+          distanz_km: { doubleValue: 5.2 },
+        } } }] },
+      },
+    },
+  });
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.example/aktivitaeten/heute", { headers: authHeaders }),
+      env,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await responseJson(response), {
+      datum: "2026-07-21",
+      aktualisiert_am: "2026-07-21T20:15:00+02:00",
+      aktivitaeten: [{ name: "Abendlauf", typ: "running", distanz_km: 5.2 }],
     });
   } finally {
     globalThis.fetch = originalFetch;

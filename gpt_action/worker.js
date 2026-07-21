@@ -13,6 +13,7 @@
  * Datenfluss:
  * Lesen:  morgenreport.py -> Firestore -> dieser Worker -> Fitnesscoach-GPT
  * Starten: Fitnesscoach-GPT -> dieser Worker -> GitHub Actions -> morgenreport.py
+ * Abends: Fitnesscoach-GPT -> Aktivitätslauf -> Garmin -> Firestore -> GPT
  *
  * ACTION_API_KEY, TRACKER_SECRET und GITHUB_ACTIONS_TOKEN_V2 müssen in Cloudflare
  * als verschlüsselte Secrets angelegt werden. Sie dürfen niemals direkt in
@@ -103,9 +104,9 @@ function githubHeaders(env) {
 }
 
 /** Liest und decodiert den aktuellsten Report aus dem festen Firestore-Dokument. */
-async function loadMorgenreport(env) {
+async function loadFirestoreDocument(env) {
   if (!env.TRACKER_SECRET) {
-    return json({ error: "Server configuration incomplete" }, 500);
+    return { error: json({ error: "Server configuration incomplete" }, 500) };
   }
 
   const documentUrl =
@@ -115,7 +116,7 @@ async function loadMorgenreport(env) {
   });
 
   if (!firestoreResponse.ok) {
-    return json({ error: "Morgenreport could not be loaded" }, 502);
+    return { error: json({ error: "Morgenreport could not be loaded" }, 502) };
   }
 
   const document = await firestoreResponse.json();
@@ -125,16 +126,39 @@ async function loadMorgenreport(env) {
       decodeFirestoreValue(value),
     ]),
   );
-  return json({ report });
+  return { report };
+}
+
+/** Liest und decodiert den aktuellsten vollständigen Morgenreport. */
+async function loadMorgenreport(env) {
+  const result = await loadFirestoreDocument(env);
+  if (result.error) return result.error;
+  return json({ report: result.report });
+}
+
+/**
+ * Gibt nur die separat am Abend aktualisierten Aktivitäten zurück.
+ * Andere Gesundheitsfelder werden an dieser Route absichtlich nicht ausgegeben,
+ * damit der GPT klar zwischen Morgenreport und Tagesaktivitäten unterscheiden kann.
+ */
+async function loadHeutigeAktivitaeten(env) {
+  const result = await loadFirestoreDocument(env);
+  if (result.error) return result.error;
+  return json({
+    datum: result.report.aktivitaeten_heute_datum ?? null,
+    aktualisiert_am: result.report.aktivitaeten_heute_aktualisiert_am ?? null,
+    aktivitaeten: result.report.aktivitaeten_heute ?? [],
+  });
 }
 
 /**
  * Startet den bestehenden workflow_dispatch auf dem main-Branch.
  * `confirmed: true` ist eine zusätzliche technische Hürde. Die GPT-Anweisungen
- * müssen außerdem verlangen, dass der Benutzer den Start ausdrücklich anfordert,
- * weil der Lauf Nachrichten versendet und GitHub-Actions-Ressourcen verbraucht.
+ * müssen außerdem verlangen, dass der Benutzer den Start ausdrücklich anfordert.
+ * Der vollständige Lauf kann Nachrichten versenden; beide Modi verbrauchen
+ * GitHub-Actions-Ressourcen.
  */
-async function startMorgenreport(request, env) {
+async function startWorkflow(request, env, activitiesOnly) {
   if (!env.GITHUB_ACTIONS_TOKEN_V2) {
     return json({ error: "Server configuration incomplete" }, 500);
   }
@@ -154,12 +178,15 @@ async function startMorgenreport(request, env) {
     {
       method: "POST",
       headers: githubHeaders(env),
-      body: JSON.stringify({ ref: "main", inputs: { dry_run: false } }),
+      body: JSON.stringify({
+        ref: "main",
+        inputs: { dry_run: false, activities_only: activitiesOnly },
+      }),
     },
   );
 
   if (!dispatchResponse.ok) {
-    return json({ error: "Morgenreport workflow could not be started" }, 502);
+    return json({ error: "Garmin workflow could not be started" }, 502);
   }
 
   // Aktuelle GitHub-API-Versionen liefern Lauf-ID und URL zurück. Die leere
@@ -182,6 +209,19 @@ async function startMorgenreport(request, env) {
     },
     202,
   );
+}
+
+/** Startet nach ausdrücklicher Bestätigung den vollständigen Morgenreport. */
+async function startMorgenreport(request, env) {
+  return startWorkflow(request, env, false);
+}
+
+/**
+ * Startet nach ausdrücklicher Bestätigung nur die Aktualisierung der heutigen
+ * Aktivitäten. Dieser Modus sendet weder Telegram noch E-Mail.
+ */
+async function startHeutigeAktivitaeten(request, env) {
+  return startWorkflow(request, env, true);
 }
 
 /** Liefert ausschließlich den Status eines zuvor gestarteten Workflow-Laufs. */
@@ -224,7 +264,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Nur die drei dokumentierten Kombinationen aus Methode und Pfad zulassen.
+    // Nur die fünf dokumentierten Kombinationen aus Methode und Pfad zulassen.
     // Freie Repository-, Workflow-, Firestore- oder Datumsparameter existieren
     // absichtlich nicht.
     const isReadRoute = request.method === "GET" && url.pathname === "/morgenreport";
@@ -232,7 +272,14 @@ export default {
       request.method === "POST" && url.pathname === "/morgenreport/start";
     const isStatusRoute =
       request.method === "GET" && url.pathname === "/morgenreport/status";
-    if (!isReadRoute && !isStartRoute && !isStatusRoute) {
+    const isTodayActivitiesReadRoute =
+      request.method === "GET" && url.pathname === "/aktivitaeten/heute";
+    const isTodayActivitiesStartRoute =
+      request.method === "POST" && url.pathname === "/aktivitaeten/heute/start";
+    if (
+      !isReadRoute && !isStartRoute && !isStatusRoute &&
+      !isTodayActivitiesReadRoute && !isTodayActivitiesStartRoute
+    ) {
       return json({ error: "Not found" }, 404);
     }
 
@@ -246,6 +293,8 @@ export default {
 
     if (isReadRoute) return loadMorgenreport(env);
     if (isStartRoute) return startMorgenreport(request, env);
+    if (isTodayActivitiesReadRoute) return loadHeutigeAktivitaeten(env);
+    if (isTodayActivitiesStartRoute) return startHeutigeAktivitaeten(request, env);
     return getMorgenreportStatus(url, env);
   },
 };

@@ -30,6 +30,20 @@ Der Worker akzeptiert keine freien Repository-, Workflow-, Firestore- oder
 Dokumentparameter. Dadurch kann das GPT ausschließlich den Morgenreport-Workflow
 starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
 
+Für eine aktuelle Abendabfrage gibt es einen zweiten, eng begrenzten Modus:
+
+```text
+Fitnesscoach-GPT
+    -> POST /aktivitaeten/heute/start (nur nach Bestätigung)
+    -> derselbe feste GitHub-Workflow mit activities_only=true
+    -> Garmin-Aktivitäten des heutigen Tages werden in Firestore aktualisiert
+    -> GET /morgenreport/status prüft den Abschluss
+    -> GET /aktivitaeten/heute liefert Datum, Aktualisierungszeit und Aktivitäten
+```
+
+Dieser Modus sendet ausdrücklich keine Telegram- oder E-Mail-Nachricht und
+verändert den morgendlichen Versandmarker nicht.
+
 ## Dateien
 
 - `worker.js`: Laufzeitcode für Cloudflare; prüft Authentifizierung, liest das
@@ -40,7 +54,8 @@ starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
   GitHub-Aufrufe, Statusfilterung und Firestore-Decodierung.
 - `../morgenreport.py`: schreibt Einzelwerte und `report_text` in Firestore.
   `aktivitaeten_gestern` enthält zusätzlich alle von Garmin gelieferten
-  Aktivitäten des Vortags als strukturierte Liste, ohne Typfilter.
+  Aktivitäten des Vortags als strukturierte Liste, ohne Typfilter. Der getrennte
+  Abendmodus aktualisiert nur `aktivitaeten_heute`, Datum und Zeitstempel.
 - `../tests/test_morgenreport.py`: schützt den Firestore-Datenvertrag vor
   unbeabsichtigten Änderungen.
 
@@ -91,7 +106,8 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 2. Authentication auf **API key** und **Bearer** stellen.
 3. Als Schlüssel ausschließlich den Wert von `ACTION_API_KEY` eintragen.
 4. Den vollständigen Inhalt von `openapi.yaml` als Schema einfügen.
-5. `getAktuellenMorgenreport`, `startMorgenreport` und
+5. `getAktuellenMorgenreport`, `startMorgenreport`,
+   `getHeutigeAktivitaeten`, `startHeutigeAktivitaetenAktualisierung` und
    `getMorgenreportStatus` in der Vorschau testen.
 6. In den GPT-Anweisungen festlegen:
    - Vor jeder Tagesanalyse den aktuellen Report laden und dessen Datum prüfen.
@@ -101,6 +117,14 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
    - Erst bei `status=completed` und `conclusion=success` den neuen Report laden.
    - Bei einem fehlgeschlagenen Lauf transparent den GitHub-Link ausgeben und
      niemals behaupten, der Report sei aktualisiert worden.
+   - Bei der Frage nach heutigen oder abendlichen Aktivitäten zunächst
+     `getHeutigeAktivitaeten` aufrufen und Datum sowie `aktualisiert_am` nennen.
+   - Wenn Gerald aktuelle Garmin-Daten abrufen möchte, vor dem Start ausdrücklich
+     bestätigen lassen. Danach `startHeutigeAktivitaetenAktualisierung` mit
+     `{ "confirmed": true }`, die Statusfunktion und abschließend erneut
+     `getHeutigeAktivitaeten` verwenden.
+   - Ein leeres Aktivitätsarray nicht als endgültig "kein Training" ausgeben,
+     ohne zugleich den Zeitpunkt des letzten Garmin-Abrufs zu nennen.
 
 ## Erwartetes Verhalten und Fehler
 
@@ -129,7 +153,8 @@ Wenn Firestore-Felder ergänzt oder umbenannt werden, diese Stellen gemeinsam ä
 
 Die Aktivitätsliste verwendet Firestore-Arrays und verschachtelte Maps. Neue
 Garmin-Aktivitätstypen werden nicht einzeln freigeschaltet: Solange Garmin sie im
-Tagesabruf liefert, müssen sie ohne Filter in `aktivitaeten_gestern` erscheinen.
+Tagesabruf liefert, müssen sie ohne Filter in `aktivitaeten_gestern` und
+`aktivitaeten_heute` erscheinen.
 
 Nach Änderungen zuerst `python -m unittest discover -s tests -v` und
 `node --test --test-isolation=none gpt_action/worker.test.mjs` ausführen. Die

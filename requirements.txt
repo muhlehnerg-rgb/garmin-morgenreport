@@ -2,3 +2,6 @@ garminconnect>=0.3.6
 anthropic
 python-dotenv>=1.0
 requests>=2.31
+# Windows enthält die IANA-Zeitzonendaten nicht immer im Python-Systempaket.
+# Der Zeitstempel der Abendabfrage muss trotzdem korrekt Europe/Vienna verwenden.
+tzdata>=2025.2
