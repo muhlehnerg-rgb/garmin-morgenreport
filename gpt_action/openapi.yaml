@@ -194,12 +194,11 @@ paths:
       operationId: getHeutigeAktivitaeten
       summary: Zuletzt aktualisierte Aktivitäten von heute laden
       description: >-
-        Liefert die separat gespeicherten Garmin-Aktivitäten des heutigen Tages.
-        Immer datum und aktualisiert_am nennen. Ein leeres Array bedeutet nur,
-        dass beim angegebenen Aktualisierungszeitpunkt keine Aktivität geliefert
-        wurde. Wenn Gerald ausdrücklich aktuelle Daten wünscht, zuerst seine
-        Bestätigung einholen, startHeutigeAktivitaetenAktualisierung aufrufen,
-        den Laufstatus prüfen und danach diese Funktion erneut aufrufen.
+        Liefert die zuletzt gespeicherten Aktivitäten von heute. Datum und
+        Aktualisierungszeit immer nennen. Für aktuelle Daten nach Geralds
+        ausdrücklicher Bestätigung die Aktualisierung starten, ihren Status
+        prüfen und danach erneut laden. Ein leeres Array gilt nur für den
+        angegebenen Abrufzeitpunkt.
       responses:
         "200":
           description: Heutige Aktivitätsdaten aus dem letzten Abendabruf.
