@@ -1,6 +1,9 @@
 name: Telegram Inbox
 
 on:
+  push:
+    paths:
+      - ".github/workflows/telegram_bot.yml"
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
