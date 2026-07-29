@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import telegram_inbox
 
@@ -23,6 +23,20 @@ class TelegramInboxParserTests(unittest.TestCase):
         )
         self.assertEqual(
             telegram_inbox.parse_inbox_text("Merke: Spaziergang half")["type"],
+            "note",
+        )
+
+    def test_telegram_befehle_werden_ohne_praefix_gespeichert(self):
+        self.assertEqual(
+            telegram_inbox.parse_inbox_text("/aufgabe Firestore-Regeln pruefen"),
+            {
+                "type": "task",
+                "label": "Aufgabe",
+                "content": "Firestore-Regeln pruefen",
+            },
+        )
+        self.assertEqual(
+            telegram_inbox.parse_inbox_text("/notiz Spaziergang half")['type'],
             "note",
         )
 
@@ -86,6 +100,48 @@ class TelegramInboxProcessingTests(unittest.TestCase):
         )
         self.assertEqual((gespeichert, ignoriert), (0, 0))
         antworten.assert_called_once()
+
+    @patch("telegram_inbox.sende_projekt_auswahl")
+    @patch("telegram_inbox.speichere_eintrag", return_value=True)
+    def test_aufgabenbefehl_zeigt_projektwahl(self, speichern, projektwahl):
+        updates = [
+            {
+                "update_id": 42,
+                "message": {
+                    "message_id": 10,
+                    "date": 1,
+                    "chat": {"id": 123},
+                    "text": "/aufgabe Button testen",
+                },
+            }
+        ]
+        gespeichert, ignoriert = telegram_inbox.verarbeite_updates(
+            updates,
+            Mock(),
+            "uid",
+            "123",
+            "https://telegram.invalid",
+        )
+        self.assertEqual((gespeichert, ignoriert), (1, 0))
+        speichern.assert_called_once()
+        projektwahl.assert_called_once_with(
+            "https://telegram.invalid", 123, ANY, "uid", "telegram_42"
+        )
+
+
+class TelegramProjektwahlTests(unittest.TestCase):
+    def test_projekt_tastatur_enthaelt_aktive_projekte_und_ohne_projekt(self):
+        tastatur = telegram_inbox.projekt_tastatur(
+            "telegram_42",
+            [{"id": "projekt_1", "name": "Morgenreport"}],
+        )
+        self.assertEqual(
+            tastatur["inline_keyboard"],
+            [
+                [{"text": "Morgenreport", "callback_data": "ip:telegram_42:projekt_1"}],
+                [{"text": "Ohne Projekt", "callback_data": "ip:telegram_42:none"}],
+            ],
+        )
 
 
 if __name__ == "__main__":
