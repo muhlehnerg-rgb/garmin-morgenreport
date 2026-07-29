@@ -1,0 +1,57 @@
+name: Cockpit Backup
+
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhaengigkeiten installieren
+        run: pip install google-cloud-firestore cryptography
+
+      - name: Schluessellos bei Google Cloud anmelden
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/872101045107/locations/global/workloadIdentityPools/github-actions/providers/garmin-morgenreport-github-actions
+          service_account: github-cockpit-backup@gewohnheitstracker-3b30a.iam.gserviceaccount.com
+
+      - name: Firestore-Daten exportieren
+        env:
+          FIRESTORE_PROJEKT: gewohnheitstracker-3b30a
+          FIREBASE_USER_UID: Q3hX1JXrnwV3nJa5wS7RQTrlCQi1
+          TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
+        run: |
+          mkdir -p backups
+          python firestore_backup.py --output backups/cockpit.json
+
+      - name: Backup verschluesseln
+        run: |
+          DATUM=$(TZ=Europe/Vienna date +%Y-%m-%d)
+          python backup_crypto.py encrypt \
+            --input backups/cockpit.json \
+            --output "backups/cockpit-${DATUM}.json.enc" \
+            --public-key backup_public.pem
+          shred -u backups/cockpit.json
+
+      - name: Verschluesseltes Backup speichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: cockpit-backup-${{ github.run_id }}
+          path: backups/*.json.enc
+          if-no-files-found: error
+          retention-days: 30
