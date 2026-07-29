@@ -29,6 +29,7 @@ jobs:
         with:
           workload_identity_provider: projects/872101045107/locations/global/workloadIdentityPools/github-actions/providers/garmin-morgenreport-github-actions
           service_account: github-cockpit-backup@gewohnheitstracker-3b30a.iam.gserviceaccount.com
+          audience: https://iam.googleapis.com/projects/872101045107/locations/global/workloadIdentityPools/github-actions/providers/garmin-morgenreport-github-actions
 
       - name: Firestore-Daten exportieren
         env:
