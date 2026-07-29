@@ -12,6 +12,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
 FIREBASE_USER_UID = os.environ.get("FIREBASE_USER_UID", "")
+letzter_schritt = "Start"
 
 PREFIXE = {
     "aufgabe": ("task", "Aufgabe"),
@@ -126,6 +127,7 @@ def verarbeite_updates(updates, client, user_uid, erlaubte_chat_id, api_url):
 
 
 def main():
+    global letzter_schritt
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not FIREBASE_USER_UID:
         raise SystemExit(
             "TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID und FIREBASE_USER_UID muessen gesetzt sein"
@@ -133,12 +135,15 @@ def main():
     from google.cloud import firestore
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    letzter_schritt = "Telegram-Abruf"
     updates = hole_neue_nachrichten(api_url)
     if not updates:
         print("Keine neuen Telegram-Updates.")
         return
 
+    letzter_schritt = "Firestore-Verbindung"
     client = firestore.Client(project=FIRESTORE_PROJEKT)
+    letzter_schritt = "Inbox-Verarbeitung"
     gespeichert, ignoriert = verarbeite_updates(
         updates,
         client,
@@ -147,9 +152,23 @@ def main():
         api_url,
     )
     letzte_id = max(update["update_id"] for update in updates)
+    letzter_schritt = "Telegram-Abschluss"
     bestaetige_nachrichten(api_url, letzte_id)
     print(f"Telegram-Inbox: {gespeichert} gespeichert, {ignoriert} fremde Updates ignoriert.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        print(f"Telegram-Inbox fehlgeschlagen bei: {letzter_schritt}")
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                sende_antwort(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}",
+                    TELEGRAM_CHAT_ID,
+                    f"Inbox-Fehler bei {letzter_schritt}. Ich pruefe die Verbindung.",
+                )
+            except requests.RequestException:
+                pass
+        raise

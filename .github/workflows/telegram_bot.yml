@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - ".github/workflows/telegram_bot.yml"
+      - "telegram_inbox.py"
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
