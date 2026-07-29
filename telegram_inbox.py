@@ -11,6 +11,7 @@ import requests
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
+FIRESTORE_DATENBANK = os.environ.get("FIRESTORE_DATENBANK", "default")
 FIREBASE_USER_UID = os.environ.get("FIREBASE_USER_UID", "")
 letzter_schritt = "Start"
 
@@ -142,7 +143,10 @@ def main():
         return
 
     letzter_schritt = "Firestore-Verbindung"
-    client = firestore.Client(project=FIRESTORE_PROJEKT)
+    client = firestore.Client(
+        project=FIRESTORE_PROJEKT,
+        database=FIRESTORE_DATENBANK,
+    )
     letzter_schritt = "Inbox-Verarbeitung"
     gespeichert, ignoriert = verarbeite_updates(
         updates,

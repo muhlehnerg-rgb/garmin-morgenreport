@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 FORMAT_VERSION = 1
+FIRESTORE_DATENBANK = os.environ.get("FIRESTORE_DATENBANK", "default")
 
 
 def json_wert(wert):
@@ -63,7 +64,10 @@ def exportiere_backup(project_id, user_uid, tracker_secret=""):
     """Erzeugt den strukturierten Backup-Inhalt fuer Cockpit und Garmin-Historie."""
     from google.cloud import firestore
 
-    client = firestore.Client(project=project_id)
+    client = firestore.Client(
+        project=project_id,
+        database=FIRESTORE_DATENBANK,
+    )
     dokumente = []
     ausgeschlossen = []
 

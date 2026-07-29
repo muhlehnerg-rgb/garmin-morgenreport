@@ -5,6 +5,9 @@ import telegram_inbox
 
 
 class TelegramInboxParserTests(unittest.TestCase):
+    def test_firestore_standarddatenbank_ist_konfiguriert(self):
+        self.assertEqual(telegram_inbox.FIRESTORE_DATENBANK, "default")
+
     def test_bekannte_praefixe_werden_erkannt(self):
         self.assertEqual(
             telegram_inbox.parse_inbox_text("Aufgabe: Firestore-Regeln pruefen"),
