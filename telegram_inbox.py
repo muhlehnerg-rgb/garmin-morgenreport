@@ -17,6 +17,7 @@ letzter_schritt = "Start"
 
 PREFIXE = {
     "aufgabe": ("task", "Aufgabe"),
+    "kaufen": ("buy", "Einkauf"),
     "idee": ("idea", "Idee"),
     "merke": ("note", "Notiz"),
     "notiz": ("note", "Notiz"),
@@ -24,6 +25,7 @@ PREFIXE = {
 
 TELEGRAM_BEFEHLE = [
     {"command": "aufgabe", "description": "Aufgabe erfassen"},
+    {"command": "kaufen", "description": "Einkauf erfassen"},
     {"command": "idee", "description": "Idee erfassen"},
     {"command": "notiz", "description": "Notiz speichern"},
     {"command": "abend", "description": "Abendabschluss oeffnen"},

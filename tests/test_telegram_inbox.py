@@ -39,6 +39,10 @@ class TelegramInboxParserTests(unittest.TestCase):
             telegram_inbox.parse_inbox_text("/notiz Spaziergang half")['type'],
             "note",
         )
+        self.assertEqual(
+            telegram_inbox.parse_inbox_text("/kaufen Hafermilch")['type'],
+            "buy",
+        )
 
     def test_unbekannte_oder_leere_eingabe_wird_abgelehnt(self):
         self.assertIsNone(telegram_inbox.parse_inbox_text("Hallo"))
