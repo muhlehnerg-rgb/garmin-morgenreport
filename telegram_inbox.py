@@ -19,15 +19,17 @@ PREFIXE = {
     "aufgabe": ("task", "Aufgabe"),
     "kaufen": ("buy", "Einkauf"),
     "idee": ("idea", "Idee"),
-    "merke": ("note", "Notiz"),
-    "notiz": ("note", "Notiz"),
+    "gedanke": ("note", "Gedanke"),
+    "merke": ("note", "Gedanke"),
+    "notiz": ("note", "Gedanke"),
 }
 
 TELEGRAM_BEFEHLE = [
     {"command": "aufgabe", "description": "Aufgabe erfassen"},
     {"command": "kaufen", "description": "Einkauf erfassen"},
     {"command": "idee", "description": "Idee erfassen"},
-    {"command": "notiz", "description": "Notiz speichern"},
+    {"command": "gedanke", "description": "Gedanke erfassen"},
+    {"command": "notiz", "description": "Gedanke speichern"},
     {"command": "abend", "description": "Abendabschluss oeffnen"},
     {"command": "hilfe", "description": "Kurze Hilfe"},
 ]
@@ -263,14 +265,14 @@ def verarbeite_updates(updates, client, user_uid, erlaubte_chat_id, api_url):
             sende_antwort(api_url, chat_id, "Abendabschluss: https://gewohnheitstracker-3b30a.web.app/?abend=1")
             continue
         if ist_telegram_befehl(text, "hilfe") or (ist_telegram_befehl(text, "aufgabe") and not parse_inbox_text(text)):
-            sende_antwort(api_url, chat_id, "Nutze /aufgabe Titel, /idee Text oder /notiz Text.")
+            sende_antwort(api_url, chat_id, "Nutze /aufgabe Titel, /idee Text oder /gedanke Text.")
             continue
         eintrag = parse_inbox_text(text)
         if not eintrag:
             sende_antwort(
                 api_url,
                 chat_id,
-                "Bitte beginne mit Aufgabe:, Idee: oder Merke:.",
+                "Bitte beginne mit Aufgabe:, Idee: oder Gedanke:.",
             )
             continue
         wurde_erstellt = speichere_eintrag(client, user_uid, update, nachricht, eintrag)

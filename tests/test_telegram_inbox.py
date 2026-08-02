@@ -25,6 +25,10 @@ class TelegramInboxParserTests(unittest.TestCase):
             telegram_inbox.parse_inbox_text("Merke: Spaziergang half")["type"],
             "note",
         )
+        self.assertEqual(
+            telegram_inbox.parse_inbox_text("Gedanke: Weniger planen")["label"],
+            "Gedanke",
+        )
 
     def test_telegram_befehle_werden_ohne_praefix_gespeichert(self):
         self.assertEqual(
@@ -37,6 +41,10 @@ class TelegramInboxParserTests(unittest.TestCase):
         )
         self.assertEqual(
             telegram_inbox.parse_inbox_text("/notiz Spaziergang half")['type'],
+            "note",
+        )
+        self.assertEqual(
+            telegram_inbox.parse_inbox_text("/gedanke Mehr Pausen")['type'],
             "note",
         )
         self.assertEqual(
