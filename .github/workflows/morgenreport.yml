@@ -7,6 +7,8 @@ on:
     - cron: "0 9 * * *"
     - cron: "30 9 * * *"
     - cron: "0 10 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 19 * * 0"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -19,13 +21,29 @@ on:
         required: false
         type: boolean
         default: false
+      sleep_resync:
+        description: "Nur fehlende Schlaf-/Recovery-Daten nachsynchronisieren"
+        required: false
+        type: boolean
+        default: false
+      weekly_review:
+        description: "Wochenreview aus der Tageshistorie berechnen"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  id-token: write
+
+concurrency:
+  group: morgenreport-${{ github.event.inputs.activities_only || 'daily' }}-${{ github.event.inputs.sleep_resync || 'normal' }}-${{ github.event.inputs.weekly_review || 'regular' }}
+  cancel-in-progress: false
 
 jobs:
   morgenreport:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Code auschecken
         uses: actions/checkout@v4
@@ -35,19 +53,27 @@ jobs:
         run: |
           HEUTE=$(TZ=Europe/Vienna date +%Y-%m-%d)
           STUNDE=$(TZ=Europe/Vienna date +%-H)
-          echo "Heute (Wien): $HEUTE, Stunde: $STUNDE"
+          WOCHENTAG=$(TZ=Europe/Vienna date +%u)
+          echo "Heute (Wien): $HEUTE, Stunde: $STUNDE, Wochentag: $WOCHENTAG"
 
+          if [ "$github_event_name" = "schedule" ] && [ "$WOCHENTAG" = "7" ] && [ "$STUNDE" -ge 19 ]; then
+            echo "Sonntagabend: Wochenreview."
+            echo "WEEKLY_REVIEW=true" >> "$GITHUB_ENV"
+          elif [ "$github_event_name" = "schedule" ] && [ "$STUNDE" -ge 18 ]; then
+            echo "Abendlauf: Schlaf-Nachsynchronisierung."
+            echo "SLEEP_RESYNC=true" >> "$GITHUB_ENV"
           # Der Datumsmarker verhindert nur bei den mehrfach geplanten
           # Zeitplan-Läufen einen Doppelversand. Ein workflow_dispatch wurde
           # bewusst manuell ausgelöst und darf deshalb denselben Tagesreport
           # erneut erzeugen, etwa nach einer Programm- oder Datenkorrektur.
-          if [ "$github_event_name" = "schedule" ] && [ -f ".last_sent_date.txt" ] && [ "$(cat .last_sent_date.txt)" = "$HEUTE" ]; then
+          elif [ "$github_event_name" = "schedule" ] && [ -f ".last_sent_date.txt" ] && [ "$(cat .last_sent_date.txt)" = "$HEUTE" ]; then
             echo "Heute wurde bereits gesendet. Überspringe."
             echo "SKIP=true" >> "$GITHUB_ENV"
           elif [ "$github_event_name" = "schedule" ] && [ "$STUNDE" -lt 9 ]; then
             echo "Noch zu früh am Morgen. Überspringe."
             echo "SKIP=true" >> "$GITHUB_ENV"
           fi
+
         env:
           github_event_name: ${{ github.event_name }}
 
@@ -56,6 +82,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Bei Google Cloud anmelden
+        if: env.SKIP != 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/872101045107/locations/global/workloadIdentityPools/github-actions/providers/garmin-github-actions
+          service_account: github-garmin-morgenreport@gewohnheitstracker-3b30a.iam.gserviceaccount.com
 
       - name: Abhängigkeiten installieren
         if: env.SKIP != 'true'
@@ -94,6 +127,8 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           ACTIVITIES_ONLY: ${{ inputs.activities_only }}
+          INPUT_SLEEP_RESYNC: ${{ inputs.sleep_resync }}
+          INPUT_WEEKLY_REVIEW: ${{ inputs.weekly_review }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -102,9 +137,22 @@ jobs:
           MORGENREPORT_EMPFAENGER: ${{ secrets.MORGENREPORT_EMPFAENGER }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
+          FIRESTORE_PROJEKT: gewohnheitstracker-3b30a
+          FIRESTORE_USER_UID: ${{ vars.FIRESTORE_USER_UID }}
         run: |
-          if [ "$ACTIVITIES_ONLY" = "true" ] && [ "$DRY_RUN" = "true" ]; then
+          if [ "$WEEKLY_REVIEW" = "true" ] || [ "$INPUT_WEEKLY_REVIEW" = "true" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              python morgenreport.py --wochenreview --dry-run
+            else
+              python morgenreport.py --wochenreview
+            fi
+          elif [ "$SLEEP_RESYNC" = "true" ] || [ "$INPUT_SLEEP_RESYNC" = "true" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              python morgenreport.py --schlaf-nachsynchronisieren --dry-run
+            else
+              python morgenreport.py --schlaf-nachsynchronisieren
+            fi
+          elif [ "$ACTIVITIES_ONLY" = "true" ] && [ "$DRY_RUN" = "true" ]; then
             python morgenreport.py --heutige-aktivitaeten --dry-run
           elif [ "$ACTIVITIES_ONLY" = "true" ]; then
             python morgenreport.py --heutige-aktivitaeten
@@ -135,7 +183,7 @@ jobs:
       - name: Heutiges Datum als "gesendet" markieren
         # Ein reiner Aktivitätsabruf versendet keinen Morgenreport und darf daher
         # auch nicht den Marker für einen erfolgreichen Tagesversand verändern.
-        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true
+        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true && inputs.sleep_resync != true && inputs.weekly_review != true && env.SLEEP_RESYNC != 'true' && env.WEEKLY_REVIEW != 'true'
         run: |
           TZ=Europe/Vienna date +%Y-%m-%d > .last_sent_date.txt
           git config user.name "Morgenreport Bot"

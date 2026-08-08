@@ -4,13 +4,13 @@
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
-  version: 1.3.0
+  version: 2.0.0
   description: >-
     Liefert Geralds aktuellsten Garmin-Morgenreport und kann nach ausdrücklicher
     Benutzerbestätigung den fest konfigurierten GitHub-Workflow starten.
 servers:
   # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
-  - url: https://garmin-morgenreport-gpt.muhlehner-g.workers.dev
+  - url: https://europe-west1-gewohnheitstracker-3b30a.cloudfunctions.net/garminActionApi
 paths:
   /morgenreport:
     get:
@@ -137,9 +137,9 @@ paths:
         "404":
           description: Es wurde eine nicht unterstützte Route aufgerufen.
         "500":
-          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
+          description: Die Function-Secrets sind nicht vollständig konfiguriert.
         "502":
-          description: Der Worker konnte den aktuellen Datensatz nicht aus Firestore laden.
+          description: Die Function konnte den aktuellen Datensatz nicht aus Firestore laden.
   /morgenreport/start:
     post:
       operationId: startMorgenreport
@@ -162,7 +162,7 @@ paths:
                   enum: [true]
                   description: >-
                     Muss true sein und bestätigt, dass Gerald den Start ausdrücklich
-                    verlangt hat. Ohne diese Bestätigung lehnt der Worker den Start ab.
+                    verlangt hat. Ohne diese Bestätigung lehnt die Function den Start ab.
       responses:
         "202":
           description: Der Morgenreport-Workflow wurde gestartet.
@@ -174,10 +174,10 @@ paths:
                 properties:
                   status:
                     type: string
-                    enum: [started]
+                    enum: [started, started_without_tracking]
                   run_id:
                     type: [integer, "null"]
-                    description: GitHub-Lauf-ID für die anschließende Statusabfrage.
+                    description: GitHub-Lauf-ID für die anschließende Statusabfrage. Bei started_without_tracking ist sie nicht verfügbar.
                   run_url:
                     type: [string, "null"]
                     format: uri
@@ -186,7 +186,7 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
+          description: Das GitHub-Secret ist in der Function nicht konfiguriert.
         "502":
           description: GitHub konnte den Workflow nicht starten.
   /aktivitaeten/heute:
@@ -221,9 +221,9 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
+          description: Die Function-Secrets sind nicht vollständig konfiguriert.
         "502":
-          description: Der Worker konnte den Datensatz nicht aus Firestore laden.
+          description: Die Function konnte den Datensatz nicht aus Firestore laden.
   /aktivitaeten/heute/start:
     post:
       operationId: startHeutigeAktivitaetenAktualisierung
@@ -255,7 +255,7 @@ paths:
                 properties:
                   status:
                     type: string
-                    enum: [started]
+                    enum: [started, started_without_tracking]
                   run_id:
                     type: [integer, "null"]
                   run_url:
@@ -266,7 +266,7 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
+          description: Das GitHub-Secret ist in der Function nicht konfiguriert.
         "502":
           description: GitHub konnte den Workflow nicht starten.
   /morgenreport/status:
@@ -314,7 +314,7 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
+          description: Das GitHub-Secret ist in der Function nicht konfiguriert.
         "502":
           description: GitHub konnte den Laufstatus nicht liefern.
 components:

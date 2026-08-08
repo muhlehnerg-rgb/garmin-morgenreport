@@ -51,7 +51,15 @@ Erforderliche Repository-Secrets:
 - `ANTHROPIC_API_KEY` (für den separaten Telegram-Coach)
 - `GMAIL_ADRESSE`, `GMAIL_APP_PASSWORT`, `MORGENREPORT_EMPFAENGER`
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-- `TRACKER_SECRET`
+
+Erforderliche Repository-Variable:
+
+- `FIRESTORE_USER_UID`: Firebase-UID des Hauptkontos
+
+Firestore wird über GitHub OIDC und das dedizierte Google-Servicekonto
+`github-garmin-morgenreport@gewohnheitstracker-3b30a.iam.gserviceaccount.com`
+angesprochen. Dadurch liegen keine langlebigen Firestore-Zugangsdaten und kein
+geheimer Dokumentpfad mehr im Repository.
 
 Der Workflow verwendet `GARMIN_TOKENS_B64` als Startwert und als Passwort für einen verschlüsselten Token-Cache. Nach einem erfolgreichen Lauf wird ein erneuertes Garmin-Token verschlüsselt für den nächsten Lauf gespeichert.
 
@@ -70,3 +78,12 @@ Die Ausgabe als neuen Wert von `GARMIN_TOKENS_B64` speichern. Vorhandene `garmin
 ```powershell
 python -m unittest discover -s tests -v
 ```
+# Backup wiederherstellen
+
+Das taegliche Cockpit-Backup wird verschluesselt als GitHub-Artefakt gespeichert. Vor einer Wiederherstellung immer zuerst den Dry-Run ausfuehren:
+
+```powershell
+python firestore_restore.py --project gewohnheitstracker-3b30a --user-uid Q3hX1JXrnwV3nJa5wS7RQTrlCQi1 --input cockpit.json.enc --private-key .backup_keys/cockpit_private.pem --dry-run
+```
+
+Ein echter Restore verlangt zusaetzlich `--apply --confirm WIEDERHERSTELLEN`. Der Integrationsschluessel unter `settings/integrations` wird bewusst nicht ueberschrieben.

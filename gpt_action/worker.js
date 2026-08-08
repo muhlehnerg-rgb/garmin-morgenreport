@@ -33,6 +33,8 @@ const FIRESTORE_BASE =
 const GITHUB_API_BASE =
   "https://api.github.com/repos/muhlehnerg-rgb/garmin-morgenreport";
 const GITHUB_WORKFLOW = "morgenreport.yml";
+const GITHUB_WORKFLOW_URL =
+  "https://github.com/muhlehnerg-rgb/garmin-morgenreport/actions/workflows/morgenreport.yml";
 const GITHUB_API_VERSION = "2026-03-10";
 
 /**
@@ -181,6 +183,7 @@ async function startWorkflow(request, env, activitiesOnly) {
       body: JSON.stringify({
         ref: "main",
         inputs: { dry_run: false, activities_only: activitiesOnly },
+        return_run_details: true,
       }),
     },
   );
@@ -189,9 +192,9 @@ async function startWorkflow(request, env, activitiesOnly) {
     return json({ error: "Garmin workflow could not be started" }, 502);
   }
 
-  // Aktuelle GitHub-API-Versionen liefern Lauf-ID und URL zurück. Die leere
-  // 204-Antwort älterer Versionen bleibt kompatibel, damit ein API-Rollback den
-  // eigentlichen Start nicht fälschlich als Fehler meldet.
+  // Laufdetails werden ausdrücklich angefordert. Falls GitHub trotzdem nur 204
+  // liefert, darf der GPT nicht mit einer ungültigen Statusabfrage in eine
+  // erneute Start-/Freigabeschleife geraten.
   let dispatch = {};
   if (dispatchResponse.status !== 204) {
     try {
@@ -201,11 +204,12 @@ async function startWorkflow(request, env, activitiesOnly) {
     }
   }
 
+  const runId = dispatch.workflow_run_id ?? dispatch.id ?? null;
   return json(
     {
-      status: "started",
-      run_id: dispatch.workflow_run_id ?? dispatch.id ?? null,
-      run_url: dispatch.html_url ?? null,
+      status: runId === null ? "started_without_tracking" : "started",
+      run_id: runId,
+      run_url: dispatch.html_url ?? GITHUB_WORKFLOW_URL,
     },
     202,
   );

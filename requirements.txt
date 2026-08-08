@@ -3,6 +3,7 @@ anthropic
 python-dotenv>=1.0
 requests>=2.31
 google-cloud-firestore>=2.21
+google-auth>=2.40
 cryptography>=45.0
 # Windows enthält die IANA-Zeitzonendaten nicht immer im Python-Systempaket.
 # Der Zeitstempel der Abendabfrage muss trotzdem korrekt Europe/Vienna verwenden.

@@ -94,11 +94,35 @@ test("bestaetigter Start ruft nur den festen Morgenreport-Workflow auf", async (
     assert.deepEqual(JSON.parse(capturedOptions.body), {
       ref: "main",
       inputs: { dry_run: false, activities_only: false },
+      return_run_details: true,
     });
     assert.deepEqual(await responseJson(response), {
       status: "started",
       run_id: 12345,
       run_url: "https://github.com/example/actions/runs/12345",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("204 ohne Laufdetails startet nicht erneut und markiert fehlende Verfolgung", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.example/morgenreport/start", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ confirmed: true }),
+      }),
+      env,
+    );
+    assert.equal(response.status, 202);
+    assert.deepEqual(await responseJson(response), {
+      status: "started_without_tracking",
+      run_id: null,
+      run_url: "https://github.com/muhlehnerg-rgb/garmin-morgenreport/actions/workflows/morgenreport.yml",
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -125,6 +149,7 @@ test("bestaetigter Abendstart aktiviert nur den Aktivitaetsmodus", async () => {
     assert.deepEqual(JSON.parse(capturedOptions.body), {
       ref: "main",
       inputs: { dry_run: false, activities_only: true },
+      return_run_details: true,
     });
   } finally {
     globalThis.fetch = originalFetch;

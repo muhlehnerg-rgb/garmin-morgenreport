@@ -14,6 +14,8 @@ import os
 import sys
 import smtplib
 import requests
+import google.auth
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from email.mime.text import MIMEText
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -41,10 +43,25 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
 FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJEKT}/databases/default/documents"
-# Zugangsschlüssel: Teil der Dokumentpfade, ohne ihn verweigern die Firestore-Regeln jeden Zugriff
-TRACKER_SECRET = os.environ.get("TRACKER_SECRET", "")
+FIRESTORE_USER_UID = os.environ.get("FIRESTORE_USER_UID", "")
+_FIRESTORE_CREDENTIALS = None
 
 TOKEN_ORDNER = os.path.join(BASE_DIR, ".garmin_tokens")
+
+MONATE_DE = {
+    1: "Januar",
+    2: "Februar",
+    3: "März",
+    4: "April",
+    5: "Mai",
+    6: "Juni",
+    7: "Juli",
+    8: "August",
+    9: "September",
+    10: "Oktober",
+    11: "November",
+    12: "Dezember",
+}
 
 
 class GarminLoginError(RuntimeError):
@@ -175,6 +192,50 @@ def hole_aktivitaeten(client, tag):
     return normalisiere_aktivitaeten(roh)
 
 
+def schlafdaten_unvollstaendig(daten):
+    """Erkennt Garmin-Schlafwerte, die morgens offensichtlich noch fehlen."""
+    return not daten.get("schlafdauer_h") or not daten.get("schlaf_score")
+
+
+def extrahiere_schlaf_recovery_daten(tag, stats, sleep, hrv_data):
+    """Normalisiert nur Schlaf- und Recovery-Werte aus Garmin-Rohdaten."""
+    sleep_dto      = sleep.get("dailySleepDTO", {})
+    schlafdauer_h  = round((sleep_dto.get("sleepTimeSeconds") or 0) / 3600, 1)
+    schlaf_score   = sleep_dto.get("sleepScores", {}).get("overall", {}).get("value") or 0
+    tief_min       = round((sleep_dto.get("deepSleepSeconds") or 0) / 60)
+    leicht_min     = round((sleep_dto.get("lightSleepSeconds") or 0) / 60)
+    rem_min        = round((sleep_dto.get("remSleepSeconds") or 0) / 60)
+    wach_min       = round((sleep_dto.get("awakeSleepSeconds") or 0) / 60)
+
+    hrv = None
+    if hrv_data:
+        hrv = hrv_data.get("hrvSummary", {}).get("lastNightAvg")
+
+    daten = {
+        "datum":          tag,
+        "body_battery":   stats.get("bodyBatteryMostRecentValue") or 0,
+        "ruhepuls":       stats.get("restingHeartRate") or 0,
+        "schlafdauer_h":  schlafdauer_h,
+        "schlaf_score":   schlaf_score,
+        "tief_min":       tief_min,
+        "leicht_min":     leicht_min,
+        "rem_min":        rem_min,
+        "wach_min":       wach_min,
+        "hrv":            hrv,
+    }
+    daten["sleep_data_incomplete"] = schlafdaten_unvollstaendig(daten)
+    return daten
+
+
+def hole_schlaf_recovery_daten(client, tag=None):
+    """Lädt nur die Garmin-Endpunkte, die für die Schlaf-Nachsynchronisierung nötig sind."""
+    tag = tag or date.today().isoformat()
+    stats = sicher(client.get_stats, tag, default={})
+    sleep = sicher(client.get_sleep_data, tag, default={})
+    hrv_data = sicher(client.get_hrv_data, tag, default={})
+    return extrahiere_schlaf_recovery_daten(tag, stats, sleep, hrv_data)
+
+
 def hole_daten(client):
     """Lädt Garmin-Messwerte und vereinheitlicht sie in einem flachen Dictionary.
 
@@ -198,19 +259,7 @@ def hole_daten(client):
     metrics    = sicher(client.get_max_metrics, today, default=[])
     aktivitaeten_gestern = hole_aktivitaeten(client, gestern)
 
-    # Schlaf
-    sleep_dto      = sleep.get("dailySleepDTO", {})
-    schlafdauer_h  = round((sleep_dto.get("sleepTimeSeconds") or 0) / 3600, 1)
-    schlaf_score   = sleep_dto.get("sleepScores", {}).get("overall", {}).get("value") or 0
-    tief_min       = round((sleep_dto.get("deepSleepSeconds") or 0) / 60)
-    leicht_min     = round((sleep_dto.get("lightSleepSeconds") or 0) / 60)
-    rem_min        = round((sleep_dto.get("remSleepSeconds") or 0) / 60)
-    wach_min       = round((sleep_dto.get("awakeSleepSeconds") or 0) / 60)
-
-    # HRV
-    hrv = None
-    if hrv_data:
-        hrv = hrv_data.get("hrvSummary", {}).get("lastNightAvg")
+    schlaf_recovery = extrahiere_schlaf_recovery_daten(today, stats, sleep, hrv_data)
 
     # Stress
     stress_avg = None
@@ -263,15 +312,15 @@ def hole_daten(client):
 
     return {
         "datum":          today,
-        "body_battery":   stats.get("bodyBatteryMostRecentValue") or 0,
-        "ruhepuls":       stats.get("restingHeartRate") or 0,
-        "schlafdauer_h":  schlafdauer_h,
-        "schlaf_score":   schlaf_score,
-        "tief_min":       tief_min,
-        "leicht_min":     leicht_min,
-        "rem_min":        rem_min,
-        "wach_min":       wach_min,
-        "hrv":            hrv,
+        "body_battery":   schlaf_recovery["body_battery"],
+        "ruhepuls":       schlaf_recovery["ruhepuls"],
+        "schlafdauer_h":  schlaf_recovery["schlafdauer_h"],
+        "schlaf_score":   schlaf_recovery["schlaf_score"],
+        "tief_min":       schlaf_recovery["tief_min"],
+        "leicht_min":     schlaf_recovery["leicht_min"],
+        "rem_min":        schlaf_recovery["rem_min"],
+        "wach_min":       schlaf_recovery["wach_min"],
+        "hrv":            schlaf_recovery["hrv"],
         "stress_avg":     stress_avg,
         "schritte":       schritte,
         "spo2":           spo2_avg,
@@ -281,6 +330,7 @@ def hole_daten(client):
         "int_min_woche":  int_min_woche,
         "vo2max":         vo2max,
         "aktivitaeten_gestern": aktivitaeten_gestern,
+        "sleep_data_incomplete": schlaf_recovery["sleep_data_incomplete"],
     }
 
 
@@ -333,20 +383,52 @@ def firestore_wert_schreiben(v):
     return {"stringValue": str(v)}
 
 
+def firestore_auth_headers():
+    """Erzeugt einen kurzlebigen Google-IAM-Bearer für die Firestore REST API."""
+    global _FIRESTORE_CREDENTIALS
+    if _FIRESTORE_CREDENTIALS is None:
+        _FIRESTORE_CREDENTIALS, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/datastore"]
+        )
+    if not _FIRESTORE_CREDENTIALS.valid:
+        _FIRESTORE_CREDENTIALS.refresh(GoogleAuthRequest())
+    return {"Authorization": f"Bearer {_FIRESTORE_CREDENTIALS.token}"}
+
+
+def firestore_user_url(*teile):
+    """Baut einen privaten Dokumentpfad für das konfigurierte Hauptkonto."""
+    if not FIRESTORE_USER_UID:
+        raise RuntimeError("FIRESTORE_USER_UID nicht gesetzt")
+    return "/".join([FIRESTORE_BASIS, "users", FIRESTORE_USER_UID, *teile])
+
+
 def hole_gewohnheiten():
     """Lädt die Tracker-Konfiguration für die Auswertung des Vortags.
 
-    Der Dokumentname ist durch TRACKER_SECRET bestimmt. HTTP-Fehler werden nicht
-    verborgen; main() behandelt Gewohnheiten bewusst als optionale Ergänzung und
-    kann den Garmin-Report auch ohne sie fertigstellen.
+    Der Zugriff erfolgt mit einem kurzlebigen Google-IAM-Token. HTTP-Fehler werden
+    nicht verborgen; main() behandelt Gewohnheiten bewusst als optionale Ergänzung.
     """
-    if not TRACKER_SECRET:
-        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
-    resp = requests.get(f"{FIRESTORE_BASIS}/tracker/gewohnheiten_{TRACKER_SECRET}", timeout=15)
+    resp = requests.get(
+        firestore_user_url("tracker", "gewohnheiten"),
+        headers=firestore_auth_headers(),
+        timeout=15,
+    )
     resp.raise_for_status()
     felder = resp.json().get("fields", {})
     liste = felder.get("liste")
     return firestore_wert_lesen(liste) if liste else []
+
+
+def hole_aktuellen_morgenreport_firestore():
+    """Lädt das aktuelle Report-Dokument für abgegrenzte Nachläufe."""
+    resp = requests.get(
+        firestore_user_url("health", "morning_report"),
+        headers=firestore_auth_headers(),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    felder = resp.json().get("fields", {})
+    return {k: firestore_wert_lesen(v) for k, v in felder.items()}
 
 
 def gewohnheiten_gestern(liste):
@@ -389,7 +471,20 @@ def gewohnheiten_gestern(liste):
     return ergebnisse, quote
 
 
-def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, report_text):
+def normalisiere_gewohnheits_ergebnisse(ergebnisse):
+    """Speichert Gewohnheitsresultate als stabile Maps statt Python-Tuples."""
+    normalisiert = []
+    for eintrag in ergebnisse or []:
+        if isinstance(eintrag, dict):
+            name = eintrag.get("name")
+            ok = eintrag.get("ok")
+        else:
+            name, ok = eintrag
+        normalisiert.append({"name": name, "ok": bool(ok)})
+    return normalisiert
+
+
+def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, report_text, habit_ergebnisse=None):
     """Speichert den neuesten vollständigen Report für Dashboard und GPT Action.
 
     Es wird absichtlich immer dasselbe Firestore-Dokument überschrieben. Der
@@ -404,8 +499,8 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     künstlich zu 0 oder -1 gemacht, weil ein Coach "nicht gemessen" sonst als
     echten Messwert missverstehen könnte.
 
-    TRACKER_SECRET kommt ausschließlich aus .env beziehungsweise GitHub Secrets.
-    Es darf nicht als Klartext in Quellcode, Tests oder Fehlermeldungen erscheinen.
+    Der Schreibzugriff verwendet Google-IAM mit kurzlebigen Zugangsdaten. Es gibt
+    keinen dauerhaft gültigen Firestore-Schlüssel mehr im Workflow.
     """
     # Die Feldnamen bilden zugleich den stabilen Vertrag zur GPT Action. Beim
     # Umbenennen eines Feldes deshalb auch gpt_action/openapi.yaml aktualisieren.
@@ -432,6 +527,9 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
         "spo2":          daten["spo2"],
         "atemfrequenz":  daten["atemfrequenz"],
         "habit_quote":   habit_quote,
+        "gewohnheiten":  normalisiere_gewohnheits_ergebnisse(habit_ergebnisse),
+        "sleep_data_incomplete": daten.get("sleep_data_incomplete", False),
+        "sleep_nachsynchronisiert_am": None,
         "aktivitaeten_gestern": daten.get("aktivitaeten_gestern", []),
         # Beim neuen Morgenreport werden mögliche Abenddaten des Vortags bewusst
         # geleert. Dadurch kann der Fitnesscoach nie alte Aktivitäten irrtümlich
@@ -440,20 +538,300 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
         "aktivitaeten_heute_datum": daten["datum"],
         "aktivitaeten_heute_aktualisiert_am": None,
     }
-    if not TRACKER_SECRET:
-        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
-
     # Die Firestore-REST-API erwartet pro Wert einen expliziten Typ. Die zentrale
     # Hilfsfunktion hält diese technische Darstellung aus der Fachlogik heraus.
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
 
     # PATCH aktualisiert das feste "aktueller Report"-Dokument. Ein Timeout
     # verhindert, dass ein gestörter Firestore-Aufruf den Workflow endlos blockiert.
-    resp = requests.patch(f"{FIRESTORE_BASIS}/tracker/morgenreport_{TRACKER_SECRET}", json=body, timeout=15)
+    resp = requests.patch(
+        firestore_user_url("health", "morning_report"),
+        headers=firestore_auth_headers(),
+        json=body,
+        timeout=15,
+    )
 
     # HTTP-Fehler müssen sichtbar werden; andernfalls könnte der Workflow Erfolg
     # melden, obwohl der GPT am nächsten Morgen noch veraltete Daten erhält.
     resp.raise_for_status()
+
+    schreibe_tageshistorie_firestore(daten, score, empfehlung, habit_quote, habit_ergebnisse)
+
+
+def tageshistorie_felder(daten, score=None, empfehlung=None, habit_quote=None, habit_ergebnisse=None):
+    """Reduziert den Report auf strukturierte Felder für Trendanalysen."""
+    return {
+        "datum": daten["datum"],
+        "score": score,
+        "empfehlung": empfehlung,
+        "body_battery": daten["body_battery"],
+        "hrv": daten["hrv"],
+        "ruhepuls": daten["ruhepuls"],
+        "schlafdauer_h": daten["schlafdauer_h"],
+        "schlaf_score": daten["schlaf_score"],
+        "tief_min": daten["tief_min"],
+        "rem_min": daten["rem_min"],
+        "leicht_min": daten["leicht_min"],
+        "wach_min": daten["wach_min"],
+        "stress_avg": daten["stress_avg"],
+        "schritte": daten["schritte"],
+        "tr_score": daten["tr_score"],
+        "tr_level": daten["tr_level"],
+        "int_min_woche": daten["int_min_woche"],
+        "vo2max": daten["vo2max"],
+        "spo2": daten["spo2"],
+        "atemfrequenz": daten["atemfrequenz"],
+        "habit_quote": habit_quote,
+        "gewohnheiten": normalisiere_gewohnheits_ergebnisse(habit_ergebnisse),
+        "aktivitaeten_gestern": daten.get("aktivitaeten_gestern", []),
+        "notizen": None,
+        "subjektive_energie": None,
+        "sleep_data_incomplete": daten.get("sleep_data_incomplete", False),
+        "sleep_nachsynchronisiert_am": None,
+    }
+
+
+def schreibe_tageshistorie_firestore(daten, score, empfehlung, habit_quote, habit_ergebnisse=None):
+    """Schreibt ein Tagesdokument als privates Gedächtnis für spätere Trends."""
+    felder = tageshistorie_felder(daten, score, empfehlung, habit_quote, habit_ergebnisse)
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+    resp = requests.patch(
+        firestore_user_url("health", "morning_report", "history", daten["datum"]),
+        headers=firestore_auth_headers(),
+        json=body,
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
+def schreibe_schlaf_nachsynchronisierung_firestore(daten):
+    """Aktualisiert nur Schlaf-/Recovery-Felder im aktuellen Report und Tagesdokument."""
+    aktualisiert_am = datetime.now(ZoneInfo("Europe/Vienna")).isoformat(timespec="seconds")
+    felder = {
+        "body_battery": daten["body_battery"],
+        "hrv": daten["hrv"],
+        "ruhepuls": daten["ruhepuls"],
+        "schlafdauer_h": daten["schlafdauer_h"],
+        "schlaf_score": daten["schlaf_score"],
+        "tief_min": daten["tief_min"],
+        "rem_min": daten["rem_min"],
+        "leicht_min": daten["leicht_min"],
+        "wach_min": daten["wach_min"],
+        "sleep_data_incomplete": schlafdaten_unvollstaendig(daten),
+        "sleep_nachsynchronisiert_am": aktualisiert_am,
+    }
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+    params = [("updateMask.fieldPaths", feldname) for feldname in felder]
+    for pfad in (
+        firestore_user_url("health", "morning_report"),
+        firestore_user_url("health", "morning_report", "history", daten["datum"]),
+    ):
+        resp = requests.patch(
+            pfad,
+            headers=firestore_auth_headers(),
+            params=params,
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+    return aktualisiert_am
+
+
+def daterange(start, ende):
+    """Iteriert inklusive Start und Ende über ISO-Datumswerte."""
+    tag = start
+    while tag <= ende:
+        yield tag.isoformat()
+        tag += timedelta(days=1)
+
+
+def hole_historientag_firestore(tag):
+    """Lädt ein einzelnes Tageshistorien-Dokument; fehlende Tage ergeben None."""
+    resp = requests.get(
+        firestore_user_url("health", "morning_report", "history", tag),
+        headers=firestore_auth_headers(),
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    felder = resp.json().get("fields", {})
+    return {k: firestore_wert_lesen(v) for k, v in felder.items()}
+
+
+def hole_historie_zeitraum(start, ende):
+    """Lädt vorhandene Tageshistorien-Dokumente für einen kompakten Zeitraum."""
+    tage = []
+    for tag in daterange(start, ende):
+        eintrag = hole_historientag_firestore(tag)
+        if eintrag:
+            tage.append(eintrag)
+    return tage
+
+
+def durchschnitt(werte):
+    """Berechnet einen gerundeten Durchschnitt ohne fehlende Werte."""
+    zahlen = [wert for wert in werte if isinstance(wert, (int, float)) and wert > 0]
+    return round(sum(zahlen) / len(zahlen), 1) if zahlen else None
+
+
+def trend_label(werte):
+    """Vergleicht erste und zweite Wochenhälfte grob und stabil."""
+    zahlen = [wert for wert in werte if isinstance(wert, (int, float)) and wert > 0]
+    if len(zahlen) < 4:
+        return "zu wenig Daten"
+    mitte = len(zahlen) // 2
+    vorher = sum(zahlen[:mitte]) / len(zahlen[:mitte])
+    nachher = sum(zahlen[mitte:]) / len(zahlen[mitte:])
+    delta = nachher - vorher
+    if abs(delta) < max(vorher * 0.05, 1):
+        return "stabil"
+    return "steigend" if delta > 0 else "fallend"
+
+
+def gewohnheits_extreme(tage):
+    """Ermittelt stärkste und schwächste Gewohnheit aus gespeicherten Tagesergebnissen."""
+    statistik = {}
+    for tag in tage:
+        for gewohnheit in tag.get("gewohnheiten") or []:
+            if isinstance(gewohnheit, dict):
+                name = gewohnheit.get("name")
+                ok = gewohnheit.get("ok")
+            else:
+                name, ok = gewohnheit
+            eintrag = statistik.setdefault(name, {"ok": 0, "gesamt": 0})
+            eintrag["gesamt"] += 1
+            if ok:
+                eintrag["ok"] += 1
+    auswertbar = [
+        (name, round(wert["ok"] / wert["gesamt"] * 100), wert["gesamt"])
+        for name, wert in statistik.items()
+        if wert["gesamt"] > 0
+    ]
+    if not auswertbar:
+        return None, None
+    auswertbar.sort(key=lambda eintrag: (eintrag[1], eintrag[2], eintrag[0]))
+    schwaechste = auswertbar[0]
+    staerkste = auswertbar[-1]
+    return (
+        {"name": staerkste[0], "quote": staerkste[1], "tage": staerkste[2]},
+        {"name": schwaechste[0], "quote": schwaechste[1], "tage": schwaechste[2]},
+    )
+
+
+def summe_aktivitaetsminuten(tage):
+    """Summiert Aktivitätsdauer aus der Tageshistorie, soweit Garmin sie geliefert hat."""
+    minuten = 0
+    for tag in tage:
+        for aktivitaet in tag.get("aktivitaeten_gestern") or []:
+            dauer = aktivitaet.get("dauer_min")
+            if isinstance(dauer, (int, float)):
+                minuten += dauer
+    return round(minuten)
+
+
+def wochenreview_empfehlungen(review):
+    """Leitet einen Fokus, ein Risiko und eine konkrete Anpassung regelbasiert ab."""
+    if review["schlaf_score_avg"] is not None and review["schlaf_score_avg"] < 70:
+        return (
+            "Schlafrhythmus stabilisieren",
+            "Erholung bleibt begrenzt, wenn Schlafqualität unter 70 bleibt.",
+            "Vier Abende mit fester Runterfahrzeit einplanen.",
+        )
+    if review["recovery_trend"] == "fallend":
+        return (
+            "Belastung dosieren",
+            "Fallende Erholung bei weiterem Trainingsdruck.",
+            "Maximal zwei intensive Einheiten und einen echten Ruhetag setzen.",
+        )
+    if review["habit_quote_avg"] is not None and review["habit_quote_avg"] < 70:
+        return (
+            "Basisgewohnheiten vereinfachen",
+            "Zu viele offene Gewohnheiten erzeugen Reibung.",
+            "Eine schwache Gewohnheit auf eine Minimalversion reduzieren.",
+        )
+    return (
+        "Stabilität halten",
+        "Zu viele neue Ziele könnten ein funktionierendes System verwässern.",
+        "Eine bestehende Routine bewusst beibehalten und nur eine Sache verbessern.",
+    )
+
+
+def erstelle_wochenreview(tage, ende=None):
+    """Berechnet ein strukturiertes Wochenreview aus Tageshistorie."""
+    ende = ende or date.today()
+    start = ende - timedelta(days=6)
+    staerkste, schwaechste = gewohnheits_extreme(tage)
+    review = {
+        "woche_start": start.isoformat(),
+        "woche_ende": ende.isoformat(),
+        "tage_gefunden": len(tage),
+        "schlafdauer_avg": durchschnitt([tag.get("schlafdauer_h") for tag in tage]),
+        "schlaf_score_avg": durchschnitt([tag.get("schlaf_score") for tag in tage]),
+        "schlaf_trend": trend_label([tag.get("schlaf_score") for tag in tage]),
+        "recovery_avg": durchschnitt([tag.get("score") for tag in tage]),
+        "recovery_trend": trend_label([tag.get("score") for tag in tage]),
+        "body_battery_avg": durchschnitt([tag.get("body_battery") for tag in tage]),
+        "hrv_avg": durchschnitt([tag.get("hrv") for tag in tage]),
+        "schritte_summe": sum(tag.get("schritte") or 0 for tag in tage),
+        "aktivitaeten_anzahl": sum(len(tag.get("aktivitaeten_gestern") or []) for tag in tage),
+        "trainingsminuten_summe": summe_aktivitaetsminuten(tage),
+        "habit_quote_avg": durchschnitt([tag.get("habit_quote") for tag in tage]),
+        "staerkste_gewohnheit": staerkste,
+        "schwaechste_gewohnheit": schwaechste,
+    }
+    fokus, risiko, anpassung = wochenreview_empfehlungen(review)
+    review.update({
+        "fokus_naechste_woche": fokus,
+        "risiko_naechste_woche": risiko,
+        "konkrete_anpassung": anpassung,
+    })
+    review["review_text"] = formatiere_wochenreview(review)
+    return review
+
+
+def formatiere_wochenreview(review):
+    """Erzeugt einen kompakten Klartext für Firestore, Logs und spätere Coach-Ausgabe."""
+    staerkste = review.get("staerkste_gewohnheit") or {}
+    schwaechste = review.get("schwaechste_gewohnheit") or {}
+    staerkste_text = (
+        f"{staerkste.get('name')} ({staerkste.get('quote')}%)"
+        if staerkste else "nicht verfügbar"
+    )
+    schwaechste_text = (
+        f"{schwaechste.get('name')} ({schwaechste.get('quote')}%)"
+        if schwaechste else "nicht verfügbar"
+    )
+    return "\n".join([
+        f"WOCHENREVIEW {review['woche_start']} bis {review['woche_ende']}",
+        "",
+        f"Schlaf: Ø {na(review['schlafdauer_avg'], 'h')}, Score Ø {na(review['schlaf_score_avg'])}, Trend {review['schlaf_trend']}",
+        f"Erholung: Score Ø {na(review['recovery_avg'])}, Trend {review['recovery_trend']}",
+        f"Bewegung: {review['aktivitaeten_anzahl']} Aktivitäten, {review['trainingsminuten_summe']} min, {review['schritte_summe']} Schritte",
+        f"Gewohnheiten: Ø {na(review['habit_quote_avg'], '%')}, stärkste: {staerkste_text}, schwächste: {schwaechste_text}",
+        "",
+        f"Fokus nächste Woche: {review['fokus_naechste_woche']}",
+        f"Risiko: {review['risiko_naechste_woche']}",
+        f"Konkrete Anpassung: {review['konkrete_anpassung']}",
+    ])
+
+
+def schreibe_wochenreview_firestore(review):
+    """Speichert das aktuelle Wochenreview und zusätzlich ein Wochenarchiv."""
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in review.items()}}
+    aktuelle_url = firestore_user_url("health", "morning_report", "reviews", "aktuell")
+    archiv_url = firestore_user_url(
+        "health", "morning_report", "reviews",
+        f"{review['woche_start']}_{review['woche_ende']}",
+    )
+    for url in (aktuelle_url, archiv_url):
+        resp = requests.patch(
+            url,
+            headers=firestore_auth_headers(),
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
 
 
 def schreibe_heutige_aktivitaeten_firestore(tag, aktivitaeten):
@@ -464,9 +842,6 @@ def schreibe_heutige_aktivitaeten_firestore(tag, aktivitaeten):
     Felder. Schlaf, Erholungsscore, Gewohnheiten und der morgens versendete Text
     bleiben dadurch unverändert, und es wird keine zweite Nachricht verschickt.
     """
-    if not TRACKER_SECRET:
-        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
-
     aktualisiert_am = datetime.now(ZoneInfo("Europe/Vienna")).isoformat(timespec="seconds")
     felder = {
         "aktivitaeten_heute": aktivitaeten,
@@ -476,7 +851,8 @@ def schreibe_heutige_aktivitaeten_firestore(tag, aktivitaeten):
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
     params = [("updateMask.fieldPaths", feldname) for feldname in felder]
     resp = requests.patch(
-        f"{FIRESTORE_BASIS}/tracker/morgenreport_{TRACKER_SECRET}",
+        firestore_user_url("health", "morning_report"),
+        headers=firestore_auth_headers(),
         params=params,
         json=body,
         timeout=15,
@@ -621,6 +997,29 @@ def formatiere_aktivitaet(aktivitaet):
     return [titel] + (["    " + " | ".join(details)] if details else [])
 
 
+def formatiere_reportdatum(datum_iso, heute=None):
+    """Formatiert das Reportdatum lesbar und markiert den heutigen Report."""
+    try:
+        reportdatum = date.fromisoformat(datum_iso)
+    except (TypeError, ValueError):
+        return str(datum_iso)
+
+    heute = heute or date.today()
+    prefix = "heute, " if reportdatum == heute else ""
+    monat = MONATE_DE.get(reportdatum.month, reportdatum.strftime("%B"))
+    return f"{prefix}{reportdatum.day}. {monat} {reportdatum.year}"
+
+
+def fehlende_garmin_werte(daten):
+    """Nennt zentrale Garmin-Werte, die im aktuellen Abruf nicht verfügbar sind."""
+    felder = [
+        ("Trainingsbereitschaft", daten.get("tr_score")),
+        ("VO₂max", daten.get("vo2max")),
+        ("wöchentliche Intensitätsminuten", daten.get("int_min_woche")),
+    ]
+    return [name for name, wert in felder if wert is None]
+
+
 def erstelle_text(daten, score, gruende, gewohnheiten=None):
     """Baut den kanonischen Klartextbericht für alle Ausgabekanäle.
 
@@ -633,6 +1032,13 @@ def erstelle_text(daten, score, gruende, gewohnheiten=None):
         "═" * 40,
         f"  MORGENREPORT  {daten['datum']}",
         "═" * 40,
+        "",
+        f"  Reportdatum: {formatiere_reportdatum(daten['datum'])}",
+    ]
+    fehlende_werte = fehlende_garmin_werte(daten)
+    if fehlende_werte:
+        zeilen.append(f"  Nicht verfügbar: {', '.join(fehlende_werte)}.")
+    zeilen += [
         "",
         "  SCHLAF",
         t,
@@ -664,7 +1070,7 @@ def erstelle_text(daten, score, gruende, gewohnheiten=None):
         for aktivitaet in aktivitaeten:
             zeilen.extend(formatiere_aktivitaet(aktivitaet))
     else:
-        zeilen.append("  Keine Aktivitäten aufgezeichnet.")
+        zeilen.append("  Gestern wurde keine separate Garmin-Aktivität aufgezeichnet.")
     zeilen += [
         "",
         "  GESUNDHEIT",
@@ -761,6 +1167,16 @@ def parse_args(argv=None):
         action="store_true",
         help="Nur heutige Garmin-Aktivitaeten für die GPT-Abendabfrage aktualisieren",
     )
+    parser.add_argument(
+        "--schlaf-nachsynchronisieren",
+        action="store_true",
+        help="Nur bei morgens fehlenden Schlafdaten Schlaf-/Recovery-Werte erneut laden",
+    )
+    parser.add_argument(
+        "--wochenreview",
+        action="store_true",
+        help="Aus den letzten 7 Tageshistorien ein Wochenreview berechnen und speichern",
+    )
     return parser.parse_args(argv)
 
 
@@ -775,6 +1191,39 @@ def main(argv=None):
     print("Verbinde mit Garmin Connect...")
     client = login()
     print("OK\n")
+
+    if args.schlaf_nachsynchronisieren:
+        heute = date.today().isoformat()
+        aktueller_report = hole_aktuellen_morgenreport_firestore()
+        if aktueller_report.get("datum") != heute:
+            print(f"Kein heutiger Morgenreport in Firestore gefunden ({heute}); ueberspringe.")
+            return 0
+        if not aktueller_report.get("sleep_data_incomplete"):
+            print("Schlafdaten waren im Morgenreport bereits vollstaendig; ueberspringe.")
+            return 0
+        print(f"Lade Garmin-Schlafdaten erneut ({heute})...")
+        daten = hole_schlaf_recovery_daten(client, heute)
+        if args.dry_run:
+            status = "unvollstaendig" if schlafdaten_unvollstaendig(daten) else "vollstaendig"
+            print(f"TESTMODUS: Schlafdaten erneut geladen ({status}); Firestore uebersprungen.")
+            return 0
+        aktualisiert_am = schreibe_schlaf_nachsynchronisierung_firestore(daten)
+        print(f"Schlafdaten nachsynchronisiert ({aktualisiert_am}).")
+        return 0
+
+    if args.wochenreview:
+        ende = date.today()
+        start = ende - timedelta(days=6)
+        print(f"Lade Historie fuer Wochenreview ({start.isoformat()} bis {ende.isoformat()})...")
+        tage = hole_historie_zeitraum(start, ende)
+        review = erstelle_wochenreview(tage, ende)
+        print(f"\n{review['review_text']}\n")
+        if args.dry_run:
+            print("TESTMODUS: Wochenreview berechnet; Firestore wurde uebersprungen.")
+            return 0
+        schreibe_wochenreview_firestore(review)
+        print("Wochenreview in Firestore gespeichert.")
+        return 0
 
     # Der Abendmodus hat absichtlich einen sehr kurzen Datenfluss: Garmin lesen
     # und drei abgegrenzte Firestore-Felder aktualisieren. Er erzeugt weder einen
@@ -801,9 +1250,11 @@ def main(argv=None):
 
     gewohnheiten = None
     habit_quote = None
+    habit_ergebnisse = None
     try:
         liste = hole_gewohnheiten()
         ergebnisse, habit_quote = gewohnheiten_gestern(liste)
+        habit_ergebnisse = ergebnisse
         gewohnheiten = (ergebnisse, habit_quote)
     except Exception as e:
         print(f"Gewohnheiten konnten nicht geladen werden: {e}")
@@ -841,7 +1292,7 @@ def main(argv=None):
     # vollständig fehlgeschlagen ist. Ein Firestore-Fehler verhindert den bereits
     # erfolgreichen Telegram-Versand jedoch nicht nachträglich.
     try:
-        schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, text)
+        schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, text, habit_ergebnisse)
     except Exception as e:
         print(f"Report konnte nicht in Firestore geschrieben werden: {e}")
 
