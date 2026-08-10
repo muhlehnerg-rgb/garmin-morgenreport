@@ -51,6 +51,7 @@ Erforderliche Repository-Secrets:
 - `ANTHROPIC_API_KEY` (für den separaten Telegram-Coach)
 - `GMAIL_ADRESSE`, `GMAIL_APP_PASSWORT`, `MORGENREPORT_EMPFAENGER`
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- `TRACKER_SECRET` (nur fuer den aktuellen read-only GPT-Spiegel)
 
 Erforderliche Repository-Variable:
 
@@ -58,8 +59,10 @@ Erforderliche Repository-Variable:
 
 Firestore wird über GitHub OIDC und das dedizierte Google-Servicekonto
 `github-garmin-morgenreport@gewohnheitstracker-3b30a.iam.gserviceaccount.com`
-angesprochen. Dadurch liegen keine langlebigen Firestore-Zugangsdaten und kein
-geheimer Dokumentpfad mehr im Repository.
+angesprochen. Dadurch liegen keine langlebigen Firestore-Zugangsdaten im
+Repository. Der private Morgenreport samt Historie bleibt unter dem Benutzerpfad;
+nur der aktuelle Report wird fuer den kostenlosen Cloudflare-Worker zusaetzlich
+in ein anonym lesbares, aber nicht anonym beschreibbares Legacy-Dokument gespiegelt.
 
 Der Workflow verwendet `GARMIN_TOKENS_B64` als Startwert und als Passwort für einen verschlüsselten Token-Cache. Nach einem erfolgreichen Lauf wird ein erneuertes Garmin-Token verschlüsselt für den nächsten Lauf gespeichert.
 

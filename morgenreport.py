@@ -18,6 +18,7 @@ import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from email.mime.text import MIMEText
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from garminconnect import Garmin
 from dotenv import load_dotenv
@@ -44,6 +45,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 FIRESTORE_PROJEKT = os.environ.get("FIRESTORE_PROJEKT", "gewohnheitstracker-3b30a")
 FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJEKT}/databases/default/documents"
 FIRESTORE_USER_UID = os.environ.get("FIRESTORE_USER_UID", "")
+TRACKER_SECRET = os.environ.get("TRACKER_SECRET", "")
 _FIRESTORE_CREDENTIALS = None
 
 TOKEN_ORDNER = os.path.join(BASE_DIR, ".garmin_tokens")
@@ -402,6 +404,13 @@ def firestore_user_url(*teile):
     return "/".join([FIRESTORE_BASIS, "users", FIRESTORE_USER_UID, *teile])
 
 
+def firestore_legacy_report_url():
+    """Fester, anonym lesbarer Spiegel fuer den kostenlosen Cloudflare Worker."""
+    if not TRACKER_SECRET:
+        raise RuntimeError("TRACKER_SECRET nicht gesetzt")
+    return f"{FIRESTORE_BASIS}/tracker/morgenreport_{quote(TRACKER_SECRET, safe='')}"
+
+
 def hole_gewohnheiten():
     """Lädt die Tracker-Konfiguration für die Auswertung des Vortags.
 
@@ -499,8 +508,9 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     künstlich zu 0 oder -1 gemacht, weil ein Coach "nicht gemessen" sonst als
     echten Messwert missverstehen könnte.
 
-    Der Schreibzugriff verwendet Google-IAM mit kurzlebigen Zugangsdaten. Es gibt
-    keinen dauerhaft gültigen Firestore-Schlüssel mehr im Workflow.
+    Der Schreibzugriff verwendet Google-IAM mit kurzlebigen Zugangsdaten. Fuer den
+    kostenlosen Cloudflare Worker wird derselbe aktuelle Report zusaetzlich in
+    ein anonym lesbares, aber nicht anonym beschreibbares Legacy-Dokument gespiegelt.
     """
     # Die Feldnamen bilden zugleich den stabilen Vertrag zur GPT Action. Beim
     # Umbenennen eines Feldes deshalb auch gpt_action/openapi.yaml aktualisieren.
@@ -554,6 +564,14 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     # HTTP-Fehler müssen sichtbar werden; andernfalls könnte der Workflow Erfolg
     # melden, obwohl der GPT am nächsten Morgen noch veraltete Daten erhält.
     resp.raise_for_status()
+
+    legacy_resp = requests.patch(
+        firestore_legacy_report_url(),
+        headers=firestore_auth_headers(),
+        json=body,
+        timeout=15,
+    )
+    legacy_resp.raise_for_status()
 
     schreibe_tageshistorie_firestore(daten, score, empfehlung, habit_quote, habit_ergebnisse)
 
@@ -625,6 +643,7 @@ def schreibe_schlaf_nachsynchronisierung_firestore(daten):
     for pfad in (
         firestore_user_url("health", "morning_report"),
         firestore_user_url("health", "morning_report", "history", daten["datum"]),
+        firestore_legacy_report_url(),
     ):
         resp = requests.patch(
             pfad,
@@ -850,14 +869,18 @@ def schreibe_heutige_aktivitaeten_firestore(tag, aktivitaeten):
     }
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
     params = [("updateMask.fieldPaths", feldname) for feldname in felder]
-    resp = requests.patch(
+    for pfad in (
         firestore_user_url("health", "morning_report"),
-        headers=firestore_auth_headers(),
-        params=params,
-        json=body,
-        timeout=15,
-    )
-    resp.raise_for_status()
+        firestore_legacy_report_url(),
+    ):
+        resp = requests.patch(
+            pfad,
+            headers=firestore_auth_headers(),
+            params=params,
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
     return aktualisiert_am
 
 

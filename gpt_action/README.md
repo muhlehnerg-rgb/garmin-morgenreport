@@ -4,14 +4,14 @@
 
 Der eigene Fitnesscoach-GPT soll den Morgenreport selbst laden können. Eine GPT
 Action kann jedoch nur eine öffentlich erreichbare HTTPS-API aufrufen. Deshalb
-dient eine kleine Firebase Cloud Function als eng begrenzte, authentifizierte
+dient ein kleiner Cloudflare Worker als eng begrenzte, authentifizierte
 Zwischenschicht:
 
 ```text
 Garmin Connect
     -> morgenreport.py im GitHub-Workflow
-    -> festes Dokument in Firestore
-    -> GET /morgenreport in der Firebase Function
+    -> privater Datensatz und read-only Spiegel in Firestore
+    -> GET /morgenreport im Cloudflare Worker
     -> Action des persönlichen Fitnesscoach-GPT
 ```
 
@@ -19,14 +19,14 @@ Für einen Report auf Zuruf gibt es zusätzlich den umgekehrten Weg:
 
 ```text
 Fitnesscoach-GPT
-    -> POST /morgenreport/start in der Firebase Function
+    -> POST /morgenreport/start im Cloudflare Worker
     -> fest konfigurierter workflow_dispatch bei GitHub
     -> morgenreport.py aktualisiert Firestore
     -> GET /morgenreport/status prüft den Abschluss
     -> GET /morgenreport lädt den neuen Bericht
 ```
 
-Die Function akzeptiert keine freien Repository-, Workflow-, Firestore- oder
+Der Worker akzeptiert keine freien Repository-, Workflow-, Firestore- oder
 Dokumentparameter. Dadurch kann das GPT ausschließlich den Morgenreport-Workflow
 starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
 
@@ -46,12 +46,12 @@ verändert den morgendlichen Versandmarker nicht.
 
 ## Dateien
 
-- `../functions/`: Laufzeitcode der Firebase Function im Tracker-Projekt; prüft
-  Authentifizierung, liest das private Firestore-Dokument, startet den festen
-  Workflow und liefert dessen Status.
-- `openapi.yaml`: Vertrag zwischen ChatGPT und der Function.
-- `worker.js` und `worker.test.mjs`: vorübergehend beibehaltene Rückfallversion,
-  bis die Function produktiv vollständig geprüft ist.
+- `worker.js`: Laufzeitcode fuer Cloudflare; prueft Authentifizierung, liest den
+  festen read-only Firestore-Spiegel, startet den festen Workflow und liefert
+  dessen Status.
+- `openapi.yaml`: Vertrag zwischen ChatGPT und dem Worker.
+- `worker.test.mjs`: isolierte Tests fuer Authentifizierung, GitHub-Aufrufe,
+  Statusfilterung und Firestore-Decodierung.
 - `../morgenreport.py`: schreibt Einzelwerte und `report_text` in Firestore.
   `aktivitaeten_gestern` enthält zusätzlich alle von Garmin gelieferten
   Aktivitäten des Vortags als strukturierte Liste, ohne Typfilter. Der getrennte
@@ -61,15 +61,17 @@ verändert den morgendlichen Versandmarker nicht.
 
 ## Geheimnisse und ihre Aufgaben
 
-In Firebase Functions als **Secret**, niemals als Klartextvariable, Quellcode
+In Cloudflare als Typ **Secret**, niemals als Klartextvariable, Quellcode
 oder GitHub-Datei speichern:
 
 - `ACTION_API_KEY`: neuer Zufallswert ausschließlich für die Verbindung
-  ChatGPT -> Function. Dieser Wert wird später auch im GPT-Editor bei der
+  ChatGPT -> Worker. Dieser Wert wird später auch im GPT-Editor bei der
   Bearer-Authentifizierung eingetragen.
+- `TRACKER_SECRET`: bestehender Dokumentbezeichner fuer den read-only
+  Firestore-Spiegel. Dieser Wert wird niemals im GPT hinterlegt.
 - `GITHUB_ACTIONS_TOKEN_V2`: Fine-grained Personal Access Token, eingeschränkt auf
   das Repository `garmin-morgenreport` und **Actions: Read and write**. Der Token
-  wird nur von der Function an GitHub gesendet und niemals im GPT hinterlegt.
+  wird nur vom Worker an GitHub gesendet und niemals im GPT hinterlegt.
 
 Diese Geheimnisse sind unabhängig von Garmin-Passwort und Telegram-Bot-Token.
 Ein Widerruf von `ACTION_API_KEY` beeinträchtigt den Morgenreport-Versand nicht.
@@ -82,21 +84,21 @@ Ein Widerruf von `ACTION_API_KEY` beeinträchtigt den Morgenreport-Versand nicht
 3. Bei **Repository access** nur `garmin-morgenreport` auswählen.
 4. Unter **Repository permissions** ausschließlich **Actions: Read and write**
    aktivieren. Automatisch erforderliche Metadaten-Leserechte bleiben bestehen.
-5. Token erzeugen und unmittelbar als Firebase-Secret
+5. Token erzeugen und unmittelbar als Cloudflare-Secret
    `GITHUB_ACTIONS_TOKEN_V2` eintragen.
 6. Den Token nicht in Chat, Notizen, `.env`, GitHub Secrets oder Quellcode kopieren.
 
 Nach Ablauf oder Widerruf kann der GPT weiterhin vorhandene Reports lesen; nur
 der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 
-## Deployment als Firebase Function
+## Deployment in Cloudflare
 
-1. Im Tracker-Projekt `firebase functions:secrets:set ACTION_API_KEY` ausführen.
-2. `firebase functions:secrets:set GITHUB_ACTIONS_TOKEN_V2` ausführen.
-3. Mit `firebase deploy --only functions:garminActionApi` deployen.
-4. Die in `openapi.yaml` eingetragene Function-URL mit einem unautorisierten
+1. In **Workers & Pages** den bestehenden Worker `garmin-morgenreport-gpt` öffnen.
+2. Unter **Settings -> Variables and Secrets** `ACTION_API_KEY`,
+   `TRACKER_SECRET` und `GITHUB_ACTIONS_TOKEN_V2` als **Secret** pflegen.
+3. `worker.js` deployen, falls sich der Worker-Code geaendert hat.
+4. Die in `openapi.yaml` eingetragene Worker-URL mit einem unautorisierten
    Testaufruf prüfen; erwartet wird HTTP 401 ohne Gesundheitsdaten.
-5. Erst nach einem erfolgreichen GPT-Test die alte Cloudflare-Version stilllegen.
 
 ## Einrichtung im eigenen GPT
 
@@ -137,8 +139,8 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 - `400`: Startbestätigung oder numerische `run_id` fehlt.
 - `401`: Bearer-Schlüssel im GPT stimmt nicht mit `ACTION_API_KEY` überein.
 - `404`: falscher Pfad oder falsche HTTP-Methode.
-- `500`: das für den jeweiligen Endpunkt erforderliche Function-Secret fehlt.
-- `502`: Die Function erreicht Firestore beziehungsweise GitHub nicht oder der externe
+- `500`: das für den jeweiligen Endpunkt erforderliche Worker-Secret fehlt.
+- `502`: Der Worker erreicht Firestore beziehungsweise GitHub nicht oder der externe
   Dienst lehnt den Aufruf ab. Interne Fehlermeldungen werden nicht weitergegeben.
 
 Der GPT sollte nie behaupten, aktuelle Daten zu analysieren, wenn `datum` nicht

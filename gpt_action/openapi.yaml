@@ -10,7 +10,7 @@ info:
     Benutzerbestätigung den fest konfigurierten GitHub-Workflow starten.
 servers:
   # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
-  - url: https://europe-west1-gewohnheitstracker-3b30a.cloudfunctions.net/garminActionApi
+  - url: https://garmin-morgenreport-gpt.muhlehner-g.workers.dev
 paths:
   /morgenreport:
     get:
@@ -137,9 +137,9 @@ paths:
         "404":
           description: Es wurde eine nicht unterstützte Route aufgerufen.
         "500":
-          description: Die Function-Secrets sind nicht vollständig konfiguriert.
+          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
         "502":
-          description: Die Function konnte den aktuellen Datensatz nicht aus Firestore laden.
+          description: Der Worker konnte den aktuellen Datensatz nicht aus Firestore laden.
   /morgenreport/start:
     post:
       operationId: startMorgenreport
@@ -162,7 +162,7 @@ paths:
                   enum: [true]
                   description: >-
                     Muss true sein und bestätigt, dass Gerald den Start ausdrücklich
-                    verlangt hat. Ohne diese Bestätigung lehnt die Function den Start ab.
+                    verlangt hat. Ohne diese Bestätigung lehnt der Worker den Start ab.
       responses:
         "202":
           description: Der Morgenreport-Workflow wurde gestartet.
@@ -186,7 +186,7 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Das GitHub-Secret ist in der Function nicht konfiguriert.
+          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
         "502":
           description: GitHub konnte den Workflow nicht starten.
   /aktivitaeten/heute:
@@ -221,9 +221,9 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Die Function-Secrets sind nicht vollständig konfiguriert.
+          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
         "502":
-          description: Die Function konnte den Datensatz nicht aus Firestore laden.
+          description: Der Worker konnte den Datensatz nicht aus Firestore laden.
   /aktivitaeten/heute/start:
     post:
       operationId: startHeutigeAktivitaetenAktualisierung
@@ -266,7 +266,7 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Das GitHub-Secret ist in der Function nicht konfiguriert.
+          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
         "502":
           description: GitHub konnte den Workflow nicht starten.
   /morgenreport/status:
@@ -314,7 +314,7 @@ paths:
         "401":
           description: API-Schlüssel fehlt oder ist ungültig.
         "500":
-          description: Das GitHub-Secret ist in der Function nicht konfiguriert.
+          description: Das GitHub-Secret ist im Worker nicht konfiguriert.
         "502":
           description: GitHub konnte den Laufstatus nicht liefern.
 components:

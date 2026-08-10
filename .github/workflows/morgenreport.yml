@@ -139,6 +139,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIRESTORE_PROJEKT: gewohnheitstracker-3b30a
           FIRESTORE_USER_UID: ${{ vars.FIRESTORE_USER_UID }}
+          TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
         run: |
           if [ "$WEEKLY_REVIEW" = "true" ] || [ "$INPUT_WEEKLY_REVIEW" = "true" ]; then
             if [ "$DRY_RUN" = "true" ]; then

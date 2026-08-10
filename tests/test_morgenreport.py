@@ -160,15 +160,18 @@ class AktivitaetsTests(unittest.TestCase):
 class FirestoreTests(unittest.TestCase):
     def setUp(self):
         self.uid_patcher = patch.object(morgenreport, "FIRESTORE_USER_UID", "test-user")
+        self.secret_patcher = patch.object(morgenreport, "TRACKER_SECRET", "legacy-test-key")
         self.auth_patcher = patch(
             "morgenreport.firestore_auth_headers",
             return_value={"Authorization": "Bearer test-token"},
         )
         self.uid_patcher.start()
+        self.secret_patcher.start()
         self.auth_patcher.start()
 
     def tearDown(self):
         self.auth_patcher.stop()
+        self.secret_patcher.stop()
         self.uid_patcher.stop()
 
     @patch("morgenreport.requests.patch")
@@ -192,9 +195,10 @@ class FirestoreTests(unittest.TestCase):
             [("Abendroutine", True)],
         )
 
-        self.assertEqual(patch_request.call_count, 2)
+        self.assertEqual(patch_request.call_count, 3)
         aktueller_report = patch_request.call_args_list[0]
-        historie = patch_request.call_args_list[1]
+        legacy_report = patch_request.call_args_list[1]
+        historie = patch_request.call_args_list[2]
         fields = aktueller_report.kwargs["json"]["fields"]
         self.assertEqual(fields["report_text"], {"stringValue": "Vollständiger Report"})
         self.assertEqual(fields["stress_avg"], {"integerValue": "30"})
@@ -221,6 +225,7 @@ class FirestoreTests(unittest.TestCase):
             fields["aktivitaeten_heute_aktualisiert_am"], {"nullValue": None}
         )
         self.assertIn("/users/test-user/health/morning_report", aktueller_report.args[0])
+        self.assertIn("/tracker/morgenreport_legacy-test-key", legacy_report.args[0])
         self.assertIn("/users/test-user/health/morning_report/history/2026-07-13", historie.args[0])
         historie_fields = historie.kwargs["json"]["fields"]
         self.assertNotIn("report_text", historie_fields)
@@ -241,15 +246,18 @@ class FirestoreTests(unittest.TestCase):
             )
 
         self.assertEqual(zeitpunkt, "2026-07-21T20:15:00+02:00")
+        self.assertEqual(patch_request.call_count, 2)
+        self.assertIn("/users/test-user/health/morning_report", patch_request.call_args_list[0].args[0])
+        self.assertIn("/tracker/morgenreport_legacy-test-key", patch_request.call_args_list[1].args[0])
         self.assertEqual(
-            patch_request.call_args.kwargs["params"],
+            patch_request.call_args_list[0].kwargs["params"],
             [
                 ("updateMask.fieldPaths", "aktivitaeten_heute"),
                 ("updateMask.fieldPaths", "aktivitaeten_heute_datum"),
                 ("updateMask.fieldPaths", "aktivitaeten_heute_aktualisiert_am"),
             ],
         )
-        fields = patch_request.call_args.kwargs["json"]["fields"]
+        fields = patch_request.call_args_list[0].kwargs["json"]["fields"]
         self.assertEqual(set(fields), {
             "aktivitaeten_heute",
             "aktivitaeten_heute_datum",
@@ -276,7 +284,7 @@ class FirestoreTests(unittest.TestCase):
             zeitpunkt = morgenreport.schreibe_schlaf_nachsynchronisierung_firestore(daten)
 
         self.assertEqual(zeitpunkt, "2026-07-24T20:15:00+02:00")
-        self.assertEqual(patch_request.call_count, 2)
+        self.assertEqual(patch_request.call_count, 3)
         for call in patch_request.call_args_list:
             self.assertEqual(
                 call.kwargs["params"],
@@ -298,6 +306,7 @@ class FirestoreTests(unittest.TestCase):
         self.assertEqual(fields["schlafdauer_h"], {"doubleValue": 7.4})
         self.assertEqual(fields["schlaf_score"], {"integerValue": "82"})
         self.assertEqual(fields["sleep_data_incomplete"], {"booleanValue": False})
+        self.assertIn("/tracker/morgenreport_legacy-test-key", patch_request.call_args_list[2].args[0])
 
     def test_wochenreview_berechnet_trends_und_gewohnheiten(self):
         tage = []
