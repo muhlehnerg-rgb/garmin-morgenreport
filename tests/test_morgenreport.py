@@ -1,7 +1,7 @@
 import os
 import unittest
 from datetime import date
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import morgenreport
 
@@ -54,6 +54,11 @@ class ArgumentTests(unittest.TestCase):
     def test_wochenreview_argument(self):
         self.assertTrue(morgenreport.parse_args(["--wochenreview"]).wochenreview)
         self.assertFalse(morgenreport.parse_args([]).wochenreview)
+
+    def test_garmin_rueckimport_argument(self):
+        args = morgenreport.parse_args(["--garmin-rueckimport", "--tage", "21"])
+        self.assertTrue(args.garmin_rueckimport)
+        self.assertEqual(args.tage, 21)
 
 
 class AktivitaetsTests(unittest.TestCase):
@@ -157,6 +162,104 @@ class AktivitaetsTests(unittest.TestCase):
         )
 
 
+class GarminHistorienDatenTests(unittest.TestCase):
+    def test_historischer_tag_nutzt_korrekte_zeitraeume_und_neue_formate(self):
+        client = Mock(spec=[
+            "get_stats", "get_sleep_data", "get_hrv_data", "get_stress_data",
+            "get_steps_data", "get_spo2_data", "get_respiration_data",
+            "get_training_readiness", "get_weekly_intensity_minutes",
+            "get_max_metrics", "get_activities_by_date", "get_hydration_data",
+            "get_body_composition", "get_fitnessage_data", "get_endurance_score",
+            "get_training_status",
+        ])
+        client.get_stats.return_value = {
+            "bodyBatteryMostRecentValue": 72,
+            "restingHeartRate": 51,
+            "totalKilocalories": 2200,
+            "activeKilocalories": 550,
+            "totalDistanceMeters": 8400,
+            "moderateIntensityMinutes": 20,
+            "vigorousIntensityMinutes": 10,
+        }
+        client.get_sleep_data.return_value = {"dailySleepDTO": {
+            "sleepTimeSeconds": 28800,
+            "deepSleepSeconds": 4200,
+            "lightSleepSeconds": 16200,
+            "remSleepSeconds": 7200,
+            "awakeSleepSeconds": 1200,
+            "sleepScores": {"overall": {"value": 86}},
+        }}
+        client.get_hrv_data.return_value = {"hrvSummary": {"lastNightAvg": 52}}
+        client.get_stress_data.return_value = {"avgStressLevel": 24}
+        client.get_steps_data.return_value = [{"steps": 4000}, {"steps": 3500}]
+        client.get_spo2_data.return_value = {"averageSpO2": 97.2}
+        client.get_respiration_data.return_value = {"avgWakingRespirationValue": 14.3}
+        client.get_training_readiness.return_value = [{"score": 78, "level": "HIGH"}]
+        client.get_weekly_intensity_minutes.return_value = [
+            {"moderateValue": 30, "vigorousValue": 20}
+        ]
+        client.get_max_metrics.return_value = {
+            "generic": {"vo2MaxPreciseValue": 47.34}
+        }
+        client.get_activities_by_date.return_value = []
+        client.get_hydration_data.return_value = {"valueInML": 2100}
+        client.get_body_composition.return_value = {
+            "totalAverage": {"weight": 81200, "bmi": 24.1, "bodyFat": 18.2}
+        }
+        client.get_fitnessage_data.return_value = {"fitnessAge": 37}
+        client.get_endurance_score.return_value = {"overallScore": 5100}
+        client.get_training_status.return_value = {"trainingStatus": "PRODUCTIVE"}
+
+        daten = morgenreport.hole_tagesdaten(client, "2026-08-18")
+
+        client.get_stress_data.assert_called_once_with("2026-08-17")
+        client.get_steps_data.assert_called_once_with("2026-08-17")
+        client.get_activities_by_date.assert_called_once_with("2026-08-17", "2026-08-17")
+        client.get_weekly_intensity_minutes.assert_called_once_with(
+            "2026-08-17", "2026-08-18"
+        )
+        self.assertEqual(daten["int_min_woche"], 70)
+        self.assertEqual(daten["vo2max"], 47.3)
+        self.assertEqual(daten["gewicht_kg"], 81.2)
+        self.assertEqual(daten["fluessigkeit_ml"], 2100)
+        self.assertEqual(daten["fitnessalter"], 37)
+        self.assertIn("heart_rates_vortag", daten["_garmin_quellen_fehler"])
+
+    def test_fehlende_schlafwerte_bleiben_none(self):
+        daten = morgenreport.extrahiere_schlaf_recovery_daten(
+            "2026-08-18",
+            {},
+            {"dailySleepDTO": {
+                "sleepTimeSeconds": 0,
+                "deepSleepSeconds": 0,
+                "lightSleepSeconds": 0,
+                "remSleepSeconds": 0,
+                "awakeSleepSeconds": 0,
+                "sleepScores": {"overall": {"value": 0}},
+            }},
+            {},
+        )
+
+        for feld in (
+            "body_battery", "ruhepuls", "schlafdauer_h", "schlaf_score",
+            "tief_min", "leicht_min", "rem_min", "wach_min", "hrv",
+        ):
+            self.assertIsNone(daten[feld])
+        self.assertTrue(daten["sleep_data_incomplete"])
+
+    def test_grosse_rohquelle_wird_verlustfrei_komprimiert(self):
+        original = {"werte": [{"zeit": i, "puls": 55 + i % 20} for i in range(30000)]}
+
+        encoding, teile = morgenreport._rohquelle_speicherformat(original)
+
+        self.assertEqual(encoding, "gzip+base64")
+        kodiert = "".join(teile)
+        text = morgenreport.gzip.decompress(
+            morgenreport.base64.b64decode(kodiert)
+        ).decode("utf-8")
+        self.assertEqual(morgenreport.json.loads(text), original)
+
+
 class FirestoreTests(unittest.TestCase):
     def setUp(self):
         self.uid_patcher = patch.object(morgenreport, "FIRESTORE_USER_UID", "test-user")
@@ -209,6 +312,7 @@ class FirestoreTests(unittest.TestCase):
             {"stringValue": "Abendroutine"},
         )
         self.assertEqual(fields["sleep_data_incomplete"], {"booleanValue": False})
+        self.assertEqual(fields["fitnessalter"], {"nullValue": None})
         aktivitaet = fields["aktivitaeten_gestern"]["arrayValue"]["values"][0]
         self.assertEqual(
             aktivitaet["mapValue"]["fields"]["name"],
@@ -271,6 +375,32 @@ class FirestoreTests(unittest.TestCase):
             {"stringValue": "Abendlauf"},
         )
 
+    @patch("morgenreport.requests.patch")
+    def test_rueckimport_aktualisiert_nur_garmin_felder(self, patch_request):
+        patch_request.return_value.raise_for_status.return_value = None
+        daten = {
+            "datum": "2026-08-18", "body_battery": 70, "ruhepuls": 52,
+            "schlafdauer_h": 7.5, "schlaf_score": 82, "tief_min": 70,
+            "leicht_min": 250, "rem_min": 100, "wach_min": 15, "hrv": 48,
+            "stress_avg": 27, "schritte": 9000, "spo2": 97,
+            "atemfrequenz": 14, "tr_score": 72, "tr_level": "HIGH",
+            "int_min_woche": 100, "vo2max": 46,
+            "aktivitaeten_gestern": [], "sleep_data_incomplete": False,
+        }
+
+        morgenreport.aktualisiere_historientag_garmin_firestore(
+            daten, 75, "VOLLES TRAINING"
+        )
+
+        params = patch_request.call_args.kwargs["params"]
+        masken = {wert for name, wert in params if name == "updateMask.fieldPaths"}
+        self.assertIn("schlaf_score", masken)
+        self.assertIn("fitnessalter", masken)
+        self.assertNotIn("habit_quote", masken)
+        self.assertNotIn("gewohnheiten", masken)
+        self.assertNotIn("notizen", masken)
+        self.assertNotIn("subjektive_energie", masken)
+
     @patch("morgenreport.aktualisiere_schlafhistorie_spiegel")
     @patch("morgenreport.requests.patch")
     def test_schlaf_nachsynchronisierung_aendert_nur_schlaf_und_recovery(
@@ -324,6 +454,7 @@ class FirestoreTests(unittest.TestCase):
                 "datum": f"2026-07-{tag:02d}",
                 "schlafdauer_h": 7.0,
                 "hrv": None if tag == 3 else 45,
+                "fitnessalter": 37,
                 "notizen": "privat",
                 "aktivitaeten_gestern": [],
             }
@@ -337,6 +468,7 @@ class FirestoreTests(unittest.TestCase):
         self.assertEqual(historie[0]["datum"], "2026-07-03")
         self.assertEqual(historie[-1]["datum"], "2026-07-30")
         self.assertIsNone(historie[0]["hrv"])
+        self.assertEqual(historie[0]["fitnessalter"], 37)
         self.assertNotIn("notizen", historie[0])
         hole_historie.assert_called_once_with(date(2026, 7, 3), date(2026, 7, 30))
         self.assertEqual(
@@ -397,6 +529,85 @@ class FirestoreTests(unittest.TestCase):
             "/reviews/2026-07-20_2026-07-26",
             patch_request.call_args_list[1].args[0],
         )
+
+    @patch("morgenreport._patch_firestore_dokument")
+    def test_rohquellen_werden_getrennt_und_mit_manifest_gespeichert(self, patch_dokument):
+        with patch("morgenreport.ZoneInfo", return_value=None):
+            morgenreport.schreibe_garmin_rohquellen_firestore(
+                "2026-08-18",
+                {"sleep": {"dailySleepDTO": {"sleepTimeSeconds": 28000}}},
+                ["blood_pressure"],
+            )
+
+        self.assertEqual(patch_dokument.call_count, 2)
+        quellaufruf, manifestaufruf = patch_dokument.call_args_list
+        self.assertIn("/days/2026-08-18/sources/sleep", quellaufruf.args[0])
+        self.assertEqual(quellaufruf.args[1]["encoding"], "json")
+        self.assertIn("sleepTimeSeconds", quellaufruf.args[1]["data"])
+        self.assertTrue(manifestaufruf.args[0].endswith("/days/2026-08-18"))
+        self.assertEqual(manifestaufruf.args[1]["schema_version"], 1)
+        self.assertEqual(manifestaufruf.args[1]["fehlgeschlagen"], ["blood_pressure"])
+
+    @patch("morgenreport.hole_garmin_rohmanifest_firestore", return_value={"datum": "2026-05-20"})
+    @patch("morgenreport.requests.delete")
+    @patch("morgenreport.requests.get")
+    def test_abgelaufener_rohtag_wird_mit_teilstuecken_entfernt(
+        self, get_request, delete_request, _manifest
+    ):
+        get_request.return_value.json.return_value = {"documents": [{
+            "name": (
+                "projects/test/databases/(default)/documents/users/test-user/"
+                "health/garmin_raw/days/2026-05-20/sources/heart_rates_vortag"
+            ),
+            "fields": {"teile": {"integerValue": "2"}},
+        }]}
+        get_request.return_value.raise_for_status.return_value = None
+        delete_request.return_value.status_code = 200
+        delete_request.return_value.raise_for_status.return_value = None
+
+        entfernt = morgenreport.loesche_garmin_rohtag_firestore("2026-05-20")
+
+        self.assertTrue(entfernt)
+        self.assertEqual(delete_request.call_count, 4)
+        urls = [aufruf.args[0] for aufruf in delete_request.call_args_list]
+        self.assertTrue(any(url.endswith("/chunks/0001") for url in urls))
+        self.assertTrue(any(url.endswith("/chunks/0002") for url in urls))
+        self.assertTrue(any(url.endswith("/days/2026-05-20") for url in urls))
+
+    @patch("morgenreport.loesche_garmin_rohtag_firestore", return_value=False)
+    @patch("morgenreport.aktualisiere_schlafhistorie_spiegel")
+    @patch("morgenreport.schreibe_garmin_rohquellen_firestore")
+    @patch("morgenreport.schreibe_tageshistorie_firestore")
+    @patch("morgenreport.hole_tagesdaten")
+    @patch("morgenreport.hole_garmin_rohmanifest_firestore")
+    @patch("morgenreport.hole_historientag_firestore")
+    def test_rueckimport_laesst_vollstaendige_tage_aus_und_fuellt_luecken(
+        self, hole_historientag, hole_manifest, hole_tagesdaten,
+        schreibe_historie, schreibe_roh, aktualisiere_spiegel, loesche_rohtag
+    ):
+        hole_historientag.side_effect = [{"datum": "2026-08-17"}, None]
+        hole_manifest.side_effect = [
+            {"schema_version": morgenreport.GARMIN_ROHDATEN_SCHEMA_VERSION}, None
+        ]
+        hole_tagesdaten.return_value = {
+            "datum": "2026-08-18", "body_battery": 70, "schlaf_score": 80,
+            "schlafdauer_h": 7.5, "hrv": 50, "stress_avg": 25,
+            "tr_score": 70, "_garmin_rohquellen": {"sleep": {}},
+            "_garmin_quellen_fehler": [],
+        }
+
+        ergebnis = morgenreport.synchronisiere_garmin_historie(
+            Mock(), ende=date(2026, 8, 18), tage=2
+        )
+
+        hole_tagesdaten.assert_called_once_with(ANY, "2026-08-18")
+        schreibe_historie.assert_called_once()
+        schreibe_roh.assert_called_once_with("2026-08-18", {"sleep": {}}, [])
+        aktualisiere_spiegel.assert_called_once_with(date(2026, 8, 18))
+        self.assertEqual(ergebnis["historientage_ergaenzt"], 1)
+        self.assertEqual(ergebnis["rohtage_ergaenzt"], 1)
+        self.assertEqual(ergebnis["uebersprungen"], 1)
+        loesche_rohtag.assert_called_once_with("2026-05-20")
 
 
 class MainTests(unittest.TestCase):
@@ -481,6 +692,22 @@ class MainTests(unittest.TestCase):
         speichern.assert_not_called()
         sende_email.assert_not_called()
         sende_telegram.assert_not_called()
+
+    @patch("morgenreport.synchronisiere_garmin_historie")
+    @patch("morgenreport.login")
+    def test_rueckimport_arbeitet_ohne_reportversand(self, login, synchronisiere):
+        synchronisiere.return_value = {
+            "historientage_ergaenzt": 20,
+            "historientage_aktualisiert": 8,
+            "rohtage_ergaenzt": 28,
+            "uebersprungen": 0,
+        }
+
+        self.assertEqual(
+            morgenreport.main(["--garmin-rueckimport", "--tage", "28"]), 0
+        )
+
+        synchronisiere.assert_called_once_with(login.return_value, tage=28)
 
 
 if __name__ == "__main__":

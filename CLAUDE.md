@@ -27,6 +27,9 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
    und Firestore.
 3. `schreibe_morgenreport_firestore()` überschreibt das feste Dokument für den
    aktuellsten Report und erneuert den begrenzten 28-Tage-Historienspiegel.
+   `synchronisiere_garmin_historie()` ergänzt fehlende normalisierte Tageswerte
+   und archiviert umfangreiche Garmin-Rohquellen ausschließlich privat unter
+   `health/garmin_raw`.
 4. `gpt_action/worker.js` authentifiziert den GPT per Bearer-Schlüssel, liest das
    feste Dokument, startet den festen Workflow und filtert dessen Statusantwort.
 5. `gpt_action/openapi.yaml` beschreibt die Report-, Historien-, Start- und

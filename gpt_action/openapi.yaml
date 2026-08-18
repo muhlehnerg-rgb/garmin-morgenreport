@@ -85,6 +85,52 @@ paths:
                         type: [number, "null"]
                       atemfrequenz:
                         type: [number, "null"]
+                      kalorien_gesamt:
+                        type: [number, "null"]
+                      kalorien_aktiv:
+                        type: [number, "null"]
+                      distanz_km:
+                        type: [number, "null"]
+                      puls_min:
+                        type: [number, "null"]
+                      puls_max:
+                        type: [number, "null"]
+                      body_battery_min:
+                        type: [number, "null"]
+                      body_battery_max:
+                        type: [number, "null"]
+                      body_battery_geladen:
+                        type: [number, "null"]
+                      body_battery_verbraucht:
+                        type: [number, "null"]
+                      aktiv_min:
+                        type: [number, "null"]
+                      hochaktiv_min:
+                        type: [number, "null"]
+                      sitzend_min:
+                        type: [number, "null"]
+                      intensitaet_mod_min:
+                        type: [number, "null"]
+                      intensitaet_vig_min:
+                        type: [number, "null"]
+                      stockwerke_auf:
+                        type: [number, "null"]
+                      stockwerke_ab:
+                        type: [number, "null"]
+                      fluessigkeit_ml:
+                        type: [number, "null"]
+                      gewicht_kg:
+                        type: [number, "null"]
+                      bmi:
+                        type: [number, "null"]
+                      koerperfett_pct:
+                        type: [number, "null"]
+                      fitnessalter:
+                        type: [number, "null"]
+                      ausdauer_score:
+                        type: [number, "null"]
+                      trainingsstatus:
+                        type: [string, "null"]
                       habit_quote:
                         type: [number, "null"]
                         description: Erfüllungsquote der berücksichtigten Gewohnheiten in Prozent.
@@ -403,6 +449,64 @@ components:
           type: [number, "null"]
         schritte:
           type: [number, "null"]
+        spo2:
+          type: [number, "null"]
+        atemfrequenz:
+          type: [number, "null"]
+        tr_score:
+          type: [number, "null"]
+        tr_level:
+          type: [string, "null"]
+        int_min_woche:
+          type: [number, "null"]
+        vo2max:
+          type: [number, "null"]
+        kalorien_gesamt:
+          type: [number, "null"]
+        kalorien_aktiv:
+          type: [number, "null"]
+        distanz_km:
+          type: [number, "null"]
+        puls_min:
+          type: [number, "null"]
+        puls_max:
+          type: [number, "null"]
+        body_battery_min:
+          type: [number, "null"]
+        body_battery_max:
+          type: [number, "null"]
+        body_battery_geladen:
+          type: [number, "null"]
+        body_battery_verbraucht:
+          type: [number, "null"]
+        aktiv_min:
+          type: [number, "null"]
+        hochaktiv_min:
+          type: [number, "null"]
+        sitzend_min:
+          type: [number, "null"]
+        intensitaet_mod_min:
+          type: [number, "null"]
+        intensitaet_vig_min:
+          type: [number, "null"]
+        stockwerke_auf:
+          type: [number, "null"]
+        stockwerke_ab:
+          type: [number, "null"]
+        fluessigkeit_ml:
+          type: [number, "null"]
+        gewicht_kg:
+          type: [number, "null"]
+        bmi:
+          type: [number, "null"]
+        koerperfett_pct:
+          type: [number, "null"]
+        fitnessalter:
+          type: [number, "null"]
+        ausdauer_score:
+          type: [number, "null"]
+        trainingsstatus:
+          type: [string, "null"]
         sleep_data_incomplete:
           type: [boolean, "null"]
         aktivitaeten_gestern:

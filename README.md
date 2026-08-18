@@ -70,6 +70,40 @@ Schlaf-Nachsynchronisierung automatisch erneuert. Damit entstehen keine neuen
 laufenden Dienste oder zusätzlichen Kosten; der bewusst akzeptierte Nachteil ist
 die geringere Vertraulichkeit dieses begrenzten Spiegels.
 
+## Garmin-Historie und einmaliger Rückimport
+
+Der vollständige Morgenreport pflegt automatisch eine rollierende Historie der
+letzten 28 Tage. Fehlende Tage werden aus Garmin Connect nachgeladen. Dabei gibt
+es zwei getrennte Ebenen:
+
+- `users/{uid}/health/morning_report/history/{datum}` enthält normalisierte
+  Tageswerte für Trends, unter anderem Schlaf, HRV, Stress, Bewegung,
+  Trainingsstatus, Intensität, Fitnessalter und verfügbare Körperwerte.
+- `users/{uid}/health/garmin_raw/days/{datum}/sources/{quelle}` archiviert die
+  unveränderte JSON-Antwort jeder erfolgreichen Garmin-Tagesquelle. Große
+  Antworten werden verlustfrei als `gzip+base64` und bei Bedarf in Teilstücke
+  gespeichert. Das Tagesmanifest nennt erfolgreiche und nicht verfügbare Quellen.
+  Rohdaten werden 90 Tage aufbewahrt, damit der Speicherverbrauch im kostenlosen
+  Firebase-Rahmen begrenzt bleibt; die kleinen normalisierten Tageswerte bleiben
+  für langfristige Vergleiche erhalten.
+
+Der öffentliche GPT-Spiegel enthält nur die normalisierten Analysewerte, niemals
+die umfangreichen Rohantworten. Da auch Körper- und Trainingswerte im begrenzten
+Spiegel enthalten sein können, gilt weiterhin das bewusst akzeptierte
+Vertraulichkeitsrisiko der anonym lesbaren Garmin-Brücke.
+
+Ein einmaliger Rückimport kann ohne Versand eines neuen Reports gestartet werden:
+
+```powershell
+python morgenreport.py --garmin-rueckimport --tage 28
+```
+
+In GitHub Actions steht dafür beim manuellen Start der Schalter
+`history_backfill` bereit. Bereits vollständige Tage werden übersprungen. Quellen,
+die das jeweilige Garmin-Gerät nicht liefert, bleiben fehlend und werden nicht als
+Messwert 0 gespeichert. Nach dem ersten Rückimport wächst die Historie mit jedem
+Morgenreport automatisch weiter.
+
 Der Workflow verwendet `GARMIN_TOKENS_B64` als Startwert und als Passwort für einen verschlüsselten Token-Cache. Nach einem erfolgreichen Lauf wird ein erneuertes Garmin-Token verschlüsselt für den nächsten Lauf gespeichert.
 
 Wenn das Start- oder Refresh-Token vollständig ungültig ist, bricht GitHub Actions mit einer klaren Fehlermeldung ab. MFA wird ausschließlich lokal abgefragt.

@@ -30,8 +30,9 @@ Der Worker akzeptiert keine freien Repository-, Workflow-, Firestore- oder
 Dokumentparameter. Dadurch kann das GPT ausschließlich den Morgenreport-Workflow
 starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
 Die Schlafhistorie ist auf die letzten 28 Tage und einen festen Satz aus Schlaf-,
-Erholungs-, Bewegungs- und Aktivitätswerten begrenzt. Private Notizen und
-subjektive Einträge werden nicht gespiegelt.
+Erholungs-, Bewegungs-, Körper- und Aktivitätswerten begrenzt. Dazu zählen nur
+normalisierte Kennzahlen; die privaten Garmin-Rohantworten, Notizen und
+subjektiven Einträge werden nicht gespiegelt.
 
 Für eine aktuelle Abendabfrage gibt es einen zweiten, eng begrenzten Modus:
 
@@ -60,7 +61,9 @@ verändert den morgendlichen Versandmarker nicht.
   Aktivitäten des Vortags als strukturierte Liste, ohne Typfilter. Der getrennte
   Abendmodus aktualisiert nur `aktivitaeten_heute`, Datum und Zeitstempel. Nach
   jedem vollständigen Report und jeder Schlaf-Nachsynchronisierung wird außerdem
-  der kompakte 28-Tage-Ausschnitt `schlafhistorie_28_tage` erneuert.
+  der kompakte 28-Tage-Ausschnitt `schlafhistorie_28_tage` erneuert. Ein manueller
+  Garmin-Rückimport ergänzt fehlende Historientage und archiviert die Rohquellen
+  ausschließlich im privaten Benutzerpfad.
 - `../tests/test_morgenreport.py`: schützt den Firestore-Datenvertrag vor
   unbeabsichtigten Änderungen.
 

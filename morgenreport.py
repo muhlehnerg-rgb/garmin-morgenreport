@@ -10,6 +10,9 @@ lokalen, von Git ausgeschlossenen .env-Datei geladen.
 """
 
 import argparse
+import base64
+import gzip
+import json
 import os
 import sys
 import smtplib
@@ -47,6 +50,8 @@ FIRESTORE_BASIS = f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJ
 FIRESTORE_USER_UID = os.environ.get("FIRESTORE_USER_UID", "")
 TRACKER_SECRET = os.environ.get("TRACKER_SECRET", "")
 _FIRESTORE_CREDENTIALS = None
+GARMIN_ROHDATEN_SCHEMA_VERSION = 1
+GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE = 90
 
 TOKEN_ORDNER = os.path.join(BASE_DIR, ".garmin_tokens")
 
@@ -141,6 +146,42 @@ def _aktivitaetszahl(value, divisor=1, nachkommastellen=0):
     return round(ergebnis, nachkommastellen)
 
 
+def _zahl(value, divisor=1, nachkommastellen=None):
+    """Liest optionale Zahlen, ohne fehlende Garmin-Werte in 0 umzuwandeln."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        ergebnis = float(value) / divisor
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if nachkommastellen is None:
+        return int(ergebnis) if ergebnis.is_integer() else ergebnis
+    return round(ergebnis, nachkommastellen)
+
+
+def _erster_wert(daten, *gesuchte_schluessel):
+    """Sucht bekannte Garmin-Schlüssel rekursiv in wechselnden API-Antworten."""
+    if isinstance(daten, dict):
+        for schluessel in gesuchte_schluessel:
+            if schluessel in daten and daten[schluessel] is not None:
+                return daten[schluessel]
+        for wert in daten.values():
+            gefunden = _erster_wert(wert, *gesuchte_schluessel)
+            if gefunden is not None:
+                return gefunden
+    elif isinstance(daten, list):
+        for wert in daten:
+            gefunden = _erster_wert(wert, *gesuchte_schluessel)
+            if gefunden is not None:
+                return gefunden
+    return None
+
+
+def _minuten_aus_sekunden(value):
+    wert = _zahl(value, 60)
+    return round(wert) if wert is not None else None
+
+
 def normalisiere_aktivitaeten(aktivitaeten):
     """Reduziert beliebige Garmin-Aktivitäten auf stabile, relevante Felder.
 
@@ -201,22 +242,33 @@ def schlafdaten_unvollstaendig(daten):
 
 def extrahiere_schlaf_recovery_daten(tag, stats, sleep, hrv_data):
     """Normalisiert nur Schlaf- und Recovery-Werte aus Garmin-Rohdaten."""
-    sleep_dto      = sleep.get("dailySleepDTO", {})
-    schlafdauer_h  = round((sleep_dto.get("sleepTimeSeconds") or 0) / 3600, 1)
-    schlaf_score   = sleep_dto.get("sleepScores", {}).get("overall", {}).get("value") or 0
-    tief_min       = round((sleep_dto.get("deepSleepSeconds") or 0) / 60)
-    leicht_min     = round((sleep_dto.get("lightSleepSeconds") or 0) / 60)
-    rem_min        = round((sleep_dto.get("remSleepSeconds") or 0) / 60)
-    wach_min       = round((sleep_dto.get("awakeSleepSeconds") or 0) / 60)
+    stats = stats if isinstance(stats, dict) else {}
+    sleep_dto = sleep.get("dailySleepDTO", {}) if isinstance(sleep, dict) else {}
+    schlafdauer_h = _zahl(sleep_dto.get("sleepTimeSeconds"), 3600, 1)
+    if schlafdauer_h == 0:
+        schlafdauer_h = None
+    sleep_scores = sleep_dto.get("sleepScores") or {}
+    overall_score = sleep_scores.get("overall") or {}
+    schlaf_score = _zahl(
+        overall_score.get("value")
+    )
+    if schlaf_score == 0:
+        schlaf_score = None
+    tief_min = _minuten_aus_sekunden(sleep_dto.get("deepSleepSeconds"))
+    leicht_min = _minuten_aus_sekunden(sleep_dto.get("lightSleepSeconds"))
+    rem_min = _minuten_aus_sekunden(sleep_dto.get("remSleepSeconds"))
+    wach_min = _minuten_aus_sekunden(sleep_dto.get("awakeSleepSeconds"))
+    if schlafdauer_h is None:
+        tief_min = leicht_min = rem_min = wach_min = None
 
     hrv = None
-    if hrv_data:
-        hrv = hrv_data.get("hrvSummary", {}).get("lastNightAvg")
+    if isinstance(hrv_data, dict):
+        hrv = _zahl((hrv_data.get("hrvSummary") or {}).get("lastNightAvg"))
 
     daten = {
         "datum":          tag,
-        "body_battery":   stats.get("bodyBatteryMostRecentValue") or 0,
-        "ruhepuls":       stats.get("restingHeartRate") or 0,
+        "body_battery":   _zahl(stats.get("bodyBatteryMostRecentValue")),
+        "ruhepuls":       _zahl(stats.get("restingHeartRate")),
         "schlafdauer_h":  schlafdauer_h,
         "schlaf_score":   schlaf_score,
         "tief_min":       tief_min,
@@ -238,6 +290,222 @@ def hole_schlaf_recovery_daten(client, tag=None):
     return extrahiere_schlaf_recovery_daten(tag, stats, sleep, hrv_data)
 
 
+def _garmin_quelle(client, methode, *args):
+    """Ruft eine optionale Garmin-Quelle ab und meldet Fehler ohne Geheimnisse."""
+    fn = getattr(client, methode, None)
+    if not callable(fn):
+        return None, False
+    try:
+        return fn(*args), True
+    except Exception:
+        return None, False
+
+
+def hole_garmin_rohquellen(client, reportdatum):
+    """Lädt analysegeeignete Garmin-Tagesquellen für Archiv und Normalisierung.
+
+    Ein Historientag entspricht dem Morgenreport: Schlaf und Erholung enden am
+    Reportdatum, Bewegung, Stress und Aktivitäten beziehen sich auf den Vortag.
+    Konto-, Geräte- und Profildaten werden bewusst nicht archiviert.
+    """
+    tag = date.fromisoformat(reportdatum)
+    vortag = (tag - timedelta(days=1)).isoformat()
+    wochenstart = (tag - timedelta(days=tag.weekday())).isoformat()
+
+    abrufe = (
+        ("stats", "get_stats", (reportdatum,)),
+        ("stats_vortag", "get_stats", (vortag,)),
+        ("sleep", "get_sleep_data", (reportdatum,)),
+        ("hrv", "get_hrv_data", (reportdatum,)),
+        ("stress_vortag", "get_stress_data", (vortag,)),
+        ("steps_vortag", "get_steps_data", (vortag,)),
+        ("spo2", "get_spo2_data", (reportdatum,)),
+        ("respiration", "get_respiration_data", (reportdatum,)),
+        ("training_readiness", "get_training_readiness", (reportdatum,)),
+        ("weekly_intensity", "get_weekly_intensity_minutes", (wochenstart, reportdatum)),
+        ("max_metrics", "get_max_metrics", (reportdatum,)),
+        ("activities_vortag", "get_activities_by_date", (vortag, vortag)),
+        ("heart_rates_vortag", "get_heart_rates", (vortag,)),
+        ("body_battery", "get_body_battery", (reportdatum, reportdatum)),
+        ("body_battery_events", "get_body_battery_events", (reportdatum,)),
+        ("floors_vortag", "get_floors", (vortag,)),
+        ("hydration_vortag", "get_hydration_data", (vortag,)),
+        ("intensity_minutes_vortag", "get_intensity_minutes_data", (vortag,)),
+        ("body_composition", "get_body_composition", (reportdatum, reportdatum)),
+        ("training_status", "get_training_status", (reportdatum,)),
+        ("endurance_score", "get_endurance_score", (reportdatum,)),
+        ("fitness_age", "get_fitnessage_data", (reportdatum,)),
+        ("all_day_events_vortag", "get_all_day_events", (vortag,)),
+        ("blood_pressure", "get_blood_pressure", (reportdatum, reportdatum)),
+    )
+    quellen = {}
+    fehlgeschlagen = []
+    for name, methode, args in abrufe:
+        wert, erfolgreich = _garmin_quelle(client, methode, *args)
+        if erfolgreich:
+            quellen[name] = wert
+        else:
+            fehlgeschlagen.append(name)
+    return quellen, fehlgeschlagen
+
+
+def _intensitaet_woche(intensity):
+    eintraege = intensity if isinstance(intensity, list) else [intensity]
+    mod_summe = 0
+    vig_summe = 0
+    gefunden = False
+    for eintrag in eintraege:
+        if not isinstance(eintrag, dict):
+            continue
+        mod = _zahl(_erster_wert(
+            eintrag, "moderateValue", "weeklyModerateIntensityMinutes"
+        ))
+        vig = _zahl(_erster_wert(
+            eintrag, "vigorousValue", "weeklyVigorousIntensityMinutes"
+        ))
+        if mod is not None:
+            mod_summe += mod
+            gefunden = True
+        if vig is not None:
+            vig_summe += vig
+            gefunden = True
+    return mod_summe + vig_summe * 2 if gefunden else None
+
+
+def _normalisiere_gewicht(body_composition):
+    gewicht = _zahl(_erster_wert(body_composition, "weight"))
+    if gewicht is None:
+        return None
+    # Garmin Connect liefert Gewicht in diesem Endpunkt üblicherweise in Gramm.
+    return round(gewicht / 1000, 1) if gewicht > 500 else round(gewicht, 1)
+
+
+def normalisiere_garmin_quellen(reportdatum, quellen):
+    """Verdichtet Garmin-Rohantworten in stabile Tagesfelder für Auswertungen."""
+    stats = quellen.get("stats") if isinstance(quellen.get("stats"), dict) else {}
+    stats_vortag = (
+        quellen.get("stats_vortag")
+        if isinstance(quellen.get("stats_vortag"), dict)
+        else {}
+    )
+    sleep = quellen.get("sleep") if isinstance(quellen.get("sleep"), dict) else {}
+    hrv_data = quellen.get("hrv") if isinstance(quellen.get("hrv"), dict) else {}
+    stress = quellen.get("stress_vortag")
+    steps = quellen.get("steps_vortag")
+    spo2 = quellen.get("spo2")
+    resp = quellen.get("respiration")
+    readiness = quellen.get("training_readiness")
+    metrics = quellen.get("max_metrics")
+    aktivitaeten = normalisiere_aktivitaeten(quellen.get("activities_vortag"))
+    schlaf_recovery = extrahiere_schlaf_recovery_daten(
+        reportdatum, stats, sleep, hrv_data
+    )
+
+    schritte = None
+    if isinstance(steps, list):
+        schrittwerte = [
+            _zahl(eintrag.get("steps")) for eintrag in steps if isinstance(eintrag, dict)
+        ]
+        schrittwerte = [wert for wert in schrittwerte if wert is not None]
+        schritte = sum(schrittwerte) if schrittwerte else None
+    if schritte is None:
+        schritte = _zahl(stats_vortag.get("totalSteps"))
+
+    tr_score = _zahl(_erster_wert(readiness, "score"))
+    tr_level = _erster_wert(readiness, "level")
+    vo2max = _zahl(_erster_wert(metrics, "vo2MaxPreciseValue"), 1, 1)
+    body_composition = quellen.get("body_composition")
+    intensity_tag = quellen.get("intensity_minutes_vortag")
+    floors_tag = quellen.get("floors_vortag")
+    heart_rates_tag = quellen.get("heart_rates_vortag")
+    stress_avg = _zahl(_erster_wert(stress, "avgStressLevel"))
+    if stress_avg is None:
+        stress_avg = _zahl(stats_vortag.get("averageStressLevel"))
+    intensitaet_mod = _zahl(stats_vortag.get("moderateIntensityMinutes"))
+    if intensitaet_mod is None:
+        intensitaet_mod = _zahl(_erster_wert(
+            intensity_tag, "moderateIntensityMinutes", "moderateValue"
+        ))
+    intensitaet_vig = _zahl(stats_vortag.get("vigorousIntensityMinutes"))
+    if intensitaet_vig is None:
+        intensitaet_vig = _zahl(_erster_wert(
+            intensity_tag, "vigorousIntensityMinutes", "vigorousValue"
+        ))
+
+    return {
+        **schlaf_recovery,
+        "stress_avg": stress_avg,
+        "schritte": schritte,
+        "spo2": _zahl(_erster_wert(spo2, "averageSpO2"), 1, 1),
+        "atemfrequenz": _zahl(
+            _erster_wert(resp, "avgWakingRespirationValue"), 1, 1
+        ),
+        "tr_score": tr_score,
+        "tr_level": str(tr_level) if tr_level is not None else None,
+        "int_min_woche": _intensitaet_woche(quellen.get("weekly_intensity")),
+        "vo2max": vo2max,
+        "aktivitaeten_gestern": aktivitaeten,
+        "kalorien_gesamt": _zahl(stats_vortag.get("totalKilocalories")),
+        "kalorien_aktiv": _zahl(stats_vortag.get("activeKilocalories")),
+        "distanz_km": _zahl(stats_vortag.get("totalDistanceMeters"), 1000, 2),
+        "puls_min": _zahl(
+            stats_vortag.get("minHeartRate")
+            if stats_vortag.get("minHeartRate") is not None
+            else _erster_wert(heart_rates_tag, "minHeartRate")
+        ),
+        "puls_max": _zahl(
+            stats_vortag.get("maxHeartRate")
+            if stats_vortag.get("maxHeartRate") is not None
+            else _erster_wert(heart_rates_tag, "maxHeartRate")
+        ),
+        "body_battery_min": _zahl(stats.get("bodyBatteryLowestValue")),
+        "body_battery_max": _zahl(stats.get("bodyBatteryHighestValue")),
+        "body_battery_geladen": _zahl(stats.get("bodyBatteryChargedValue")),
+        "body_battery_verbraucht": _zahl(stats.get("bodyBatteryDrainedValue")),
+        "aktiv_min": _minuten_aus_sekunden(stats_vortag.get("activeSeconds")),
+        "hochaktiv_min": _minuten_aus_sekunden(stats_vortag.get("highlyActiveSeconds")),
+        "sitzend_min": _minuten_aus_sekunden(stats_vortag.get("sedentarySeconds")),
+        "intensitaet_mod_min": intensitaet_mod,
+        "intensitaet_vig_min": intensitaet_vig,
+        "stockwerke_auf": _zahl(
+            stats_vortag.get("floorsAscended")
+            if stats_vortag.get("floorsAscended") is not None
+            else _erster_wert(floors_tag, "floorsAscended")
+        ),
+        "stockwerke_ab": _zahl(
+            stats_vortag.get("floorsDescended")
+            if stats_vortag.get("floorsDescended") is not None
+            else _erster_wert(floors_tag, "floorsDescended")
+        ),
+        "fluessigkeit_ml": _zahl(_erster_wert(
+            quellen.get("hydration_vortag"), "valueInML", "totalHydration"
+        )),
+        "gewicht_kg": _normalisiere_gewicht(body_composition),
+        "bmi": _zahl(_erster_wert(body_composition, "bmi"), 1, 1),
+        "koerperfett_pct": _zahl(_erster_wert(
+            body_composition, "bodyFat", "percentFat"
+        ), 1, 1),
+        "fitnessalter": _zahl(_erster_wert(quellen.get("fitness_age"), "fitnessAge")),
+        "ausdauer_score": _zahl(_erster_wert(
+            quellen.get("endurance_score"), "overallScore", "enduranceScore"
+        )),
+        "trainingsstatus": (
+            str(_erster_wert(quellen.get("training_status"), "trainingStatus"))
+            if _erster_wert(quellen.get("training_status"), "trainingStatus") is not None
+            else None
+        ),
+    }
+
+
+def hole_tagesdaten(client, reportdatum):
+    """Lädt einen beliebigen historischen Morgenreport-Tag samt Rohquellen."""
+    quellen, fehlgeschlagen = hole_garmin_rohquellen(client, reportdatum)
+    daten = normalisiere_garmin_quellen(reportdatum, quellen)
+    daten["_garmin_rohquellen"] = quellen
+    daten["_garmin_quellen_fehler"] = fehlgeschlagen
+    return daten
+
+
 def hole_daten(client):
     """Lädt Garmin-Messwerte und vereinheitlicht sie in einem flachen Dictionary.
 
@@ -246,94 +514,7 @@ def hole_daten(client):
     Morgen noch unvollständig wäre. Die flache Struktur ist der gemeinsame Vertrag
     für Scoreberechnung, Textausgabe, Tests und Firestore.
     """
-    today = date.today().isoformat()
-    gestern = (date.today() - timedelta(days=1)).isoformat()
-
-    stats      = sicher(client.get_stats, today, default={})
-    sleep      = sicher(client.get_sleep_data, today, default={})
-    hrv_data   = sicher(client.get_hrv_data, today, default={})
-    stress     = sicher(client.get_stress_data, gestern, default={})
-    steps      = sicher(client.get_steps_data, gestern, default=[])
-    spo2       = sicher(client.get_spo2_data, today, default={})
-    resp       = sicher(client.get_respiration_data, today, default={})
-    readiness  = sicher(client.get_training_readiness, today, default={})
-    intensity  = sicher(client.get_weekly_intensity_minutes, today, default={})
-    metrics    = sicher(client.get_max_metrics, today, default=[])
-    aktivitaeten_gestern = hole_aktivitaeten(client, gestern)
-
-    schlaf_recovery = extrahiere_schlaf_recovery_daten(today, stats, sleep, hrv_data)
-
-    # Stress
-    stress_avg = None
-    if stress:
-        stress_avg = stress.get("avgStressLevel")
-
-    # Schritte
-    schritte = None
-    if steps and isinstance(steps, list) and len(steps) > 0:
-        total = sum(s.get("steps", 0) for s in steps if isinstance(s, dict))
-        schritte = total if total > 0 else None
-
-    # SpO2
-    spo2_avg = None
-    if spo2:
-        spo2_avg = spo2.get("averageSpO2")
-
-    # Atemfrequenz
-    atem_avg = None
-    if resp:
-        atem_avg = resp.get("avgWakingRespirationValue")
-
-    # Training Readiness
-    tr_score = None
-    tr_level = None
-    if readiness:
-        if isinstance(readiness, list) and len(readiness) > 0:
-            tr_score = readiness[0].get("score")
-            tr_level = readiness[0].get("level")
-        elif isinstance(readiness, dict):
-            tr_score = readiness.get("score")
-            tr_level = readiness.get("level")
-
-    # Intensitätsminuten (Woche)
-    int_min_woche = None
-    if intensity:
-        mod  = intensity.get("weeklyModerateIntensityMinutes") or 0
-        vig  = intensity.get("weeklyVigorousIntensityMinutes") or 0
-        if mod or vig:
-            int_min_woche = mod + vig * 2  # WHO-Formel: intensive Minuten zählen doppelt
-
-    # VO2 Max
-    vo2max = None
-    if metrics and isinstance(metrics, list):
-        for m in metrics:
-            v = m.get("generic", {}).get("vo2MaxPreciseValue")
-            if v:
-                vo2max = round(v, 1)
-                break
-
-    return {
-        "datum":          today,
-        "body_battery":   schlaf_recovery["body_battery"],
-        "ruhepuls":       schlaf_recovery["ruhepuls"],
-        "schlafdauer_h":  schlaf_recovery["schlafdauer_h"],
-        "schlaf_score":   schlaf_recovery["schlaf_score"],
-        "tief_min":       schlaf_recovery["tief_min"],
-        "leicht_min":     schlaf_recovery["leicht_min"],
-        "rem_min":        schlaf_recovery["rem_min"],
-        "wach_min":       schlaf_recovery["wach_min"],
-        "hrv":            schlaf_recovery["hrv"],
-        "stress_avg":     stress_avg,
-        "schritte":       schritte,
-        "spo2":           spo2_avg,
-        "atemfrequenz":   atem_avg,
-        "tr_score":       tr_score,
-        "tr_level":       tr_level,
-        "int_min_woche":  int_min_woche,
-        "vo2max":         vo2max,
-        "aktivitaeten_gestern": aktivitaeten_gestern,
-        "sleep_data_incomplete": schlaf_recovery["sleep_data_incomplete"],
-    }
+    return hole_tagesdaten(client, date.today().isoformat())
 
 
 def firestore_wert_lesen(v):
@@ -493,6 +674,59 @@ def normalisiere_gewohnheits_ergebnisse(ergebnisse):
     return normalisiert
 
 
+GARMIN_ANALYSE_ZUSATZFELDER = (
+    "kalorien_gesamt",
+    "kalorien_aktiv",
+    "distanz_km",
+    "puls_min",
+    "puls_max",
+    "body_battery_min",
+    "body_battery_max",
+    "body_battery_geladen",
+    "body_battery_verbraucht",
+    "aktiv_min",
+    "hochaktiv_min",
+    "sitzend_min",
+    "intensitaet_mod_min",
+    "intensitaet_vig_min",
+    "stockwerke_auf",
+    "stockwerke_ab",
+    "fluessigkeit_ml",
+    "gewicht_kg",
+    "bmi",
+    "koerperfett_pct",
+    "fitnessalter",
+    "ausdauer_score",
+    "trainingsstatus",
+)
+
+GARMIN_HISTORIE_AKTUALISIERUNGSFELDER = (
+    "datum",
+    "score",
+    "empfehlung",
+    "body_battery",
+    "hrv",
+    "ruhepuls",
+    "schlafdauer_h",
+    "schlaf_score",
+    "tief_min",
+    "rem_min",
+    "leicht_min",
+    "wach_min",
+    "stress_avg",
+    "schritte",
+    "tr_score",
+    "tr_level",
+    "int_min_woche",
+    "vo2max",
+    "spo2",
+    "atemfrequenz",
+    "aktivitaeten_gestern",
+    "sleep_data_incomplete",
+    *GARMIN_ANALYSE_ZUSATZFELDER,
+)
+
+
 def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, report_text, habit_ergebnisse=None):
     """Speichert den neuesten vollständigen Report für Dashboard und GPT Action.
 
@@ -548,6 +782,7 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
         "aktivitaeten_heute_datum": daten["datum"],
         "aktivitaeten_heute_aktualisiert_am": None,
     }
+    felder.update({feld: daten.get(feld) for feld in GARMIN_ANALYSE_ZUSATZFELDER})
     # Die Firestore-REST-API erwartet pro Wert einen expliziten Typ. Die zentrale
     # Hilfsfunktion hält diese technische Darstellung aus der Fachlogik heraus.
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
@@ -579,7 +814,7 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
 
 def tageshistorie_felder(daten, score=None, empfehlung=None, habit_quote=None, habit_ergebnisse=None):
     """Reduziert den Report auf strukturierte Felder für Trendanalysen."""
-    return {
+    felder = {
         "datum": daten["datum"],
         "score": score,
         "empfehlung": empfehlung,
@@ -608,6 +843,8 @@ def tageshistorie_felder(daten, score=None, empfehlung=None, habit_quote=None, h
         "sleep_data_incomplete": daten.get("sleep_data_incomplete", False),
         "sleep_nachsynchronisiert_am": None,
     }
+    felder.update({feld: daten.get(feld) for feld in GARMIN_ANALYSE_ZUSATZFELDER})
+    return felder
 
 
 def schreibe_tageshistorie_firestore(daten, score, empfehlung, habit_quote, habit_ergebnisse=None):
@@ -690,6 +927,193 @@ def hole_historie_zeitraum(start, ende):
     return tage
 
 
+def hole_garmin_rohmanifest_firestore(tag):
+    """Lädt den Status des privaten Rohdatenarchivs für einen Historientag."""
+    resp = requests.get(
+        firestore_user_url("health", "garmin_raw", "days", tag),
+        headers=firestore_auth_headers(),
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+
+
+def aktualisiere_historientag_garmin_firestore(daten, score, empfehlung):
+    """Erneuert nur Garmin-Felder und bewahrt Notizen, Gewohnheiten und Reviews."""
+    vollstaendig = tageshistorie_felder(daten, score, empfehlung)
+    felder = {
+        feld: vollstaendig.get(feld)
+        for feld in GARMIN_HISTORIE_AKTUALISIERUNGSFELDER
+    }
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+    resp = requests.patch(
+        firestore_user_url("health", "morning_report", "history", daten["datum"]),
+        headers=firestore_auth_headers(),
+        params=[("updateMask.fieldPaths", feld) for feld in felder],
+        json=body,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    felder = resp.json().get("fields", {})
+    return {k: firestore_wert_lesen(v) for k, v in felder.items()}
+
+
+def _rohquelle_speicherformat(daten):
+    """Serialisiert eine Garmin-Antwort verlustfrei und komprimiert große Quellen."""
+    text = json.dumps(daten, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(text.encode("utf-8")) <= 400_000:
+        return "json", [text]
+    komprimiert = gzip.compress(text.encode("utf-8"), compresslevel=9)
+    kodiert = base64.b64encode(komprimiert).decode("ascii")
+    return "gzip+base64", [kodiert[i:i + 700_000] for i in range(0, len(kodiert), 700_000)]
+
+
+def _patch_firestore_dokument(pfad, felder):
+    body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
+    resp = requests.patch(
+        pfad,
+        headers=firestore_auth_headers(),
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def schreibe_garmin_rohquellen_firestore(tag, quellen, fehlgeschlagen=None):
+    """Archiviert Garmin-Antworten getrennt von abgeleiteten Analysewerten."""
+    abgerufen_am = datetime.now(ZoneInfo("Europe/Vienna")).isoformat(timespec="seconds")
+    for name, daten in sorted(quellen.items()):
+        encoding, teile = _rohquelle_speicherformat(daten)
+        quelle_pfad = firestore_user_url(
+            "health", "garmin_raw", "days", tag, "sources", name
+        )
+        felder = {
+            "datum": tag,
+            "quelle": name,
+            "abgerufen_am": abgerufen_am,
+            "encoding": encoding,
+            "teile": len(teile),
+            "data": teile[0] if len(teile) == 1 else None,
+        }
+        _patch_firestore_dokument(quelle_pfad, felder)
+        if len(teile) > 1:
+            for index, teil in enumerate(teile, start=1):
+                _patch_firestore_dokument(
+                    f"{quelle_pfad}/chunks/{index:04d}",
+                    {"index": index, "data": teil},
+                )
+
+    _patch_firestore_dokument(
+        firestore_user_url("health", "garmin_raw", "days", tag),
+        {
+            "datum": tag,
+            "schema_version": GARMIN_ROHDATEN_SCHEMA_VERSION,
+            "abgerufen_am": abgerufen_am,
+            "quellen": sorted(quellen),
+            "fehlgeschlagen": sorted(fehlgeschlagen or []),
+        },
+    )
+
+
+def loesche_garmin_rohtag_firestore(tag):
+    """Entfernt einen privaten Rohdatentag inklusive möglicher Datenstücke."""
+    manifest = hole_garmin_rohmanifest_firestore(tag)
+    if manifest is None:
+        return False
+
+    headers = firestore_auth_headers()
+    quellen_url = firestore_user_url("health", "garmin_raw", "days", tag, "sources")
+    resp = requests.get(quellen_url, headers=headers, params={"pageSize": 100}, timeout=30)
+    resp.raise_for_status()
+    for dokument in resp.json().get("documents", []):
+        name = dokument.get("name")
+        if not name:
+            continue
+        dokument_url = f"https://firestore.googleapis.com/v1/{name}"
+        felder = dokument.get("fields", {})
+        teile = firestore_wert_lesen(felder.get("teile", {"integerValue": "1"})) or 1
+        for index in range(1, int(teile) + 1):
+            if int(teile) <= 1:
+                break
+            teil_resp = requests.delete(
+                f"{dokument_url}/chunks/{index:04d}", headers=headers, timeout=15
+            )
+            if teil_resp.status_code != 404:
+                teil_resp.raise_for_status()
+        quell_resp = requests.delete(dokument_url, headers=headers, timeout=15)
+        if quell_resp.status_code != 404:
+            quell_resp.raise_for_status()
+
+    manifest_resp = requests.delete(
+        firestore_user_url("health", "garmin_raw", "days", tag),
+        headers=headers,
+        timeout=15,
+    )
+    if manifest_resp.status_code != 404:
+        manifest_resp.raise_for_status()
+    return True
+
+
+def synchronisiere_garmin_historie(client, ende=None, tage=28, vorab_daten=None):
+    """Füllt fehlende Tageswerte und Rohdaten im rollierenden Zeitraum nach."""
+    ende = ende or date.today()
+    start = ende - timedelta(days=tage - 1)
+    vorab_daten = vorab_daten or {}
+    ergebnis = {
+        "geprueft": tage,
+        "historientage_ergaenzt": 0,
+        "historientage_aktualisiert": 0,
+        "rohtage_ergaenzt": 0,
+        "rohtage_entfernt": 0,
+        "uebersprungen": 0,
+    }
+
+    for tag in daterange(start, ende):
+        historie = hole_historientag_firestore(tag)
+        manifest = hole_garmin_rohmanifest_firestore(tag)
+        roh_aktuell = (
+            isinstance(manifest, dict)
+            and manifest.get("schema_version") == GARMIN_ROHDATEN_SCHEMA_VERSION
+        )
+        if historie is not None and roh_aktuell:
+            ergebnis["uebersprungen"] += 1
+            continue
+
+        ist_vorab_daten = tag in vorab_daten
+        daten = vorab_daten.get(tag)
+        if daten is None:
+            daten = hole_tagesdaten(client, tag)
+
+        score, _ = berechne_erholung(daten)
+        empfehlung, _ = trainingsempfehlung(score)
+        if historie is None:
+            schreibe_tageshistorie_firestore(daten, score, empfehlung, None)
+            ergebnis["historientage_ergaenzt"] += 1
+        elif not ist_vorab_daten:
+            aktualisiere_historientag_garmin_firestore(daten, score, empfehlung)
+            ergebnis["historientage_aktualisiert"] += 1
+
+        if not roh_aktuell:
+            schreibe_garmin_rohquellen_firestore(
+                tag,
+                daten.get("_garmin_rohquellen", {}),
+                daten.get("_garmin_quellen_fehler", []),
+            )
+            ergebnis["rohtage_ergaenzt"] += 1
+
+    if ergebnis["historientage_ergaenzt"] or ergebnis["historientage_aktualisiert"]:
+        aktualisiere_schlafhistorie_spiegel(ende)
+    abgelaufen = ende - timedelta(days=GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE)
+    try:
+        if loesche_garmin_rohtag_firestore(abgelaufen.isoformat()):
+            ergebnis["rohtage_entfernt"] = 1
+    except Exception:
+        # Aufräumen ist nachrangig; ein fertiger Rückimport darf daran nicht scheitern.
+        ergebnis["bereinigung_fehler"] = True
+    return ergebnis
+
+
 SCHLAFHISTORIE_FELDER = (
     "datum",
     "score",
@@ -704,8 +1128,15 @@ SCHLAFHISTORIE_FELDER = (
     "wach_min",
     "stress_avg",
     "schritte",
+    "spo2",
+    "atemfrequenz",
+    "tr_score",
+    "tr_level",
+    "int_min_woche",
+    "vo2max",
     "sleep_data_incomplete",
     "aktivitaeten_gestern",
+    *GARMIN_ANALYSE_ZUSATZFELDER,
 )
 
 
@@ -949,8 +1380,10 @@ def berechne_erholung(daten):
     score = 0
     gruende = []
 
-    bb = daten["body_battery"]
-    if bb >= 75:
+    bb = daten.get("body_battery")
+    if bb is None:
+        gruende.append("Body Battery nicht verfügbar")
+    elif bb >= 75:
         score += 30
     elif bb >= 50:
         score += 22
@@ -961,8 +1394,10 @@ def berechne_erholung(daten):
     else:
         gruende.append(f"Body Battery sehr niedrig ({bb})")
 
-    ss = daten["schlaf_score"]
-    if ss >= 80:
+    ss = daten.get("schlaf_score")
+    if ss is None:
+        gruende.append("Schlaf-Score nicht verfügbar")
+    elif ss >= 80:
         score += 25
     elif ss >= 60:
         score += 18
@@ -973,8 +1408,10 @@ def berechne_erholung(daten):
     else:
         gruende.append(f"Schlaf-Score sehr schlecht ({ss})")
 
-    h = daten["schlafdauer_h"]
-    if h >= 7.5:
+    h = daten.get("schlafdauer_h")
+    if h is None:
+        gruende.append("Schlafdauer nicht verfügbar")
+    elif h >= 7.5:
         score += 15
     elif h >= 6.5:
         score += 10
@@ -985,8 +1422,8 @@ def berechne_erholung(daten):
     else:
         gruende.append(f"Schlafdauer sehr kurz ({h}h)")
 
-    hrv = daten["hrv"]
-    if hrv:
+    hrv = daten.get("hrv")
+    if hrv is not None:
         if hrv >= 50:
             score += 10
         elif hrv >= 35:
@@ -995,8 +1432,8 @@ def berechne_erholung(daten):
         else:
             gruende.append(f"HRV niedrig ({hrv})")
 
-    stress = daten["stress_avg"]
-    if stress:
+    stress = daten.get("stress_avg")
+    if stress is not None:
         if stress <= 25:
             score += 10
         elif stress <= 50:
@@ -1005,8 +1442,8 @@ def berechne_erholung(daten):
         else:
             gruende.append(f"Stresslevel hoch ({stress})")
 
-    tr = daten["tr_score"]
-    if tr:
+    tr = daten.get("tr_score")
+    if tr is not None:
         if tr >= 75:
             score += 10
         elif tr >= 50:
@@ -1254,6 +1691,19 @@ def parse_args(argv=None):
         action="store_true",
         help="Aus den letzten 7 Tageshistorien ein Wochenreview berechnen und speichern",
     )
+    parser.add_argument(
+        "--garmin-rueckimport",
+        action="store_true",
+        help="Fehlende Garmin-Tageswerte und private Rohquellen nach Firestore importieren",
+    )
+    parser.add_argument(
+        "--tage",
+        type=int,
+        default=28,
+        choices=range(7, 29),
+        metavar="7..28",
+        help="Zeitraum für den Garmin-Rückimport (Standard: 28 Tage)",
+    )
     return parser.parse_args(argv)
 
 
@@ -1268,6 +1718,21 @@ def main(argv=None):
     print("Verbinde mit Garmin Connect...")
     client = login()
     print("OK\n")
+
+    if args.garmin_rueckimport:
+        if args.dry_run:
+            print("TESTMODUS: Garmin-Rückimport wurde ohne Schreibzugriff übersprungen.")
+            return 0
+        print(f"Starte Garmin-Rückimport für die letzten {args.tage} Tage...")
+        sync = synchronisiere_garmin_historie(client, tage=args.tage)
+        print(
+            "Garmin-Rückimport abgeschlossen: "
+            f"{sync['historientage_ergaenzt']} Tageswerte und "
+            f"{sync['historientage_aktualisiert']} vorhandene Tage aktualisiert, "
+            f"{sync['rohtage_ergaenzt']} Rohdatentage ergänzt; "
+            f"{sync['uebersprungen']} bereits vollständig."
+        )
+        return 0
 
     if args.schlaf_nachsynchronisieren:
         heute = date.today().isoformat()
@@ -1368,10 +1833,31 @@ def main(argv=None):
     # So erscheint im Fitnesscoach kein Report, dessen eigentlicher Tagesversand
     # vollständig fehlgeschlagen ist. Ein Firestore-Fehler verhindert den bereits
     # erfolgreichen Telegram-Versand jedoch nicht nachträglich.
+    report_gespeichert = False
     try:
         schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, text, habit_ergebnisse)
+        report_gespeichert = True
     except Exception as e:
         print(f"Report konnte nicht in Firestore geschrieben werden: {e}")
+
+    if report_gespeichert and "_garmin_rohquellen" in daten:
+        try:
+            print("Prüfe die Garmin-Historie der letzten 28 Tage auf Lücken...")
+            sync = synchronisiere_garmin_historie(
+                client,
+                vorab_daten={daten["datum"]: daten},
+            )
+            print(
+                "Garmin-Historie synchronisiert: "
+                f"{sync['historientage_ergaenzt']} Tageswerte und "
+                f"{sync['historientage_aktualisiert']} vorhandene Tage aktualisiert, "
+                f"{sync['rohtage_ergaenzt']} Rohdatentage ergänzt; "
+                f"{sync['uebersprungen']} bereits vollständig."
+            )
+        except Exception as e:
+            # Der bereits versendete Morgenreport bleibt erfolgreich. Der nächste
+            # Lauf setzt die noch fehlenden Historientage automatisch fort.
+            print(f"Garmin-Rückimport konnte nicht vollständig abgeschlossen werden: {e}")
 
     return 0
 

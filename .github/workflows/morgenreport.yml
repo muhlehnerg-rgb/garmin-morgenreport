@@ -31,19 +31,24 @@ on:
         required: false
         type: boolean
         default: false
+      history_backfill:
+        description: "Fehlende Garmin-Daten der letzten 28 Tage rückimportieren"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   id-token: write
 
 concurrency:
-  group: morgenreport-${{ github.event.inputs.activities_only || 'daily' }}-${{ github.event.inputs.sleep_resync || 'normal' }}-${{ github.event.inputs.weekly_review || 'regular' }}
+  group: morgenreport-${{ github.event.inputs.activities_only || 'daily' }}-${{ github.event.inputs.sleep_resync || 'normal' }}-${{ github.event.inputs.weekly_review || 'regular' }}-${{ github.event.inputs.history_backfill || 'no-backfill' }}
   cancel-in-progress: false
 
 jobs:
   morgenreport:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Code auschecken
         uses: actions/checkout@v4
@@ -129,6 +134,7 @@ jobs:
           ACTIVITIES_ONLY: ${{ inputs.activities_only }}
           INPUT_SLEEP_RESYNC: ${{ inputs.sleep_resync }}
           INPUT_WEEKLY_REVIEW: ${{ inputs.weekly_review }}
+          INPUT_HISTORY_BACKFILL: ${{ inputs.history_backfill }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -141,7 +147,13 @@ jobs:
           FIRESTORE_USER_UID: ${{ vars.FIRESTORE_USER_UID }}
           TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
         run: |
-          if [ "$WEEKLY_REVIEW" = "true" ] || [ "$INPUT_WEEKLY_REVIEW" = "true" ]; then
+          if [ "$INPUT_HISTORY_BACKFILL" = "true" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              python morgenreport.py --garmin-rueckimport --dry-run
+            else
+              python morgenreport.py --garmin-rueckimport
+            fi
+          elif [ "$WEEKLY_REVIEW" = "true" ] || [ "$INPUT_WEEKLY_REVIEW" = "true" ]; then
             if [ "$DRY_RUN" = "true" ]; then
               python morgenreport.py --wochenreview --dry-run
             else
@@ -184,7 +196,7 @@ jobs:
       - name: Heutiges Datum als "gesendet" markieren
         # Ein reiner Aktivitätsabruf versendet keinen Morgenreport und darf daher
         # auch nicht den Marker für einen erfolgreichen Tagesversand verändern.
-        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true && inputs.sleep_resync != true && inputs.weekly_review != true && env.SLEEP_RESYNC != 'true' && env.WEEKLY_REVIEW != 'true'
+        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true && inputs.sleep_resync != true && inputs.weekly_review != true && inputs.history_backfill != true && env.SLEEP_RESYNC != 'true' && env.WEEKLY_REVIEW != 'true'
         run: |
           TZ=Europe/Vienna date +%Y-%m-%d > .last_sent_date.txt
           git config user.name "Morgenreport Bot"
