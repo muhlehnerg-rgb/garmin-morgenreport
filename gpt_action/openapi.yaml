@@ -147,11 +147,10 @@ paths:
       summary: Schlaf- und Erholungshistorie laden
       description: >-
         Lädt die letzten 7 bis 28 verfügbaren Tageswerte für Schlaf-, Erholungs-
-        und grobe Trainingsanalysen. Für Fragen nach Trends über mehrere Wochen
-        verwenden. tage_gefunden kann kleiner als tage_angefragt sein. Nullwerte
-        bedeuten "nicht verfügbar" und dürfen weder als Messwert 0 noch als
-        schlechter Wert interpretiert werden. Die Daten eignen sich für
-        persönliche Muster und keine medizinische Diagnose.
+        und Trainingstrends. tage_gefunden kann kleiner als tage_angefragt sein.
+        Nullwerte bedeuten "nicht verfügbar" und dürfen nicht als 0 interpretiert
+        werden. Die Daten dienen persönlichen Mustern, nicht medizinischen
+        Diagnosen.
       parameters:
         - name: tage
           in: query
