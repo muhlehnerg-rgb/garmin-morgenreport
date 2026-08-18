@@ -2,7 +2,8 @@ name: Morgenreport
 
 on:
   schedule:
-    - cron: "30 2 * * *"
+    # Nach dem taeglichen Firestore-Gratisquota-Reset (Mitternacht Pacific).
+    - cron: "30 11 * * *"
     - cron: "0 8 * * *"
     - cron: "30 8 * * *"
     - cron: "0 9 * * *"
@@ -77,8 +78,8 @@ jobs:
           WOCHENTAG=$(TZ=Europe/Vienna date +%u)
           echo "Heute (Wien): $HEUTE, Stunde: $STUNDE, Wochentag: $WOCHENTAG"
 
-          if [ "$github_event_name" = "schedule" ] && [ "$github_event_schedule" = "30 2 * * *" ]; then
-            echo "Nächtlicher Langzeitimport."
+          if [ "$github_event_name" = "schedule" ] && [ "$github_event_schedule" = "30 11 * * *" ]; then
+            echo "Langzeitimport nach dem Firestore-Quota-Reset."
             echo "LONG_TERM_BACKFILL=true" >> "$GITHUB_ENV"
           elif [ "$github_event_name" = "schedule" ] && [ "$WOCHENTAG" = "7" ] && [ "$STUNDE" -ge 19 ]; then
             echo "Sonntagabend: Wochenreview."

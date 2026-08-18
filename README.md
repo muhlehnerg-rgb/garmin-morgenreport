@@ -121,8 +121,9 @@ python morgenreport.py --garmin-langzeitimport --von 2020-01-01 --batch-tage 28
 ```
 
 Jeder Lauf bearbeitet höchstens 7 bis 90 Tage und speichert anschließend seinen
-Checkpoint. GitHub Actions startet standardmäßig täglich ein Paket mit 28 Tagen,
-bis der Beginn erreicht ist. Ältere Tage werden vollständig normalisiert, ihre
+Checkpoint. GitHub Actions startet standardmäßig täglich nach dem Reset des
+kostenlosen Firestore-Tageskontingents ein Paket mit 28 Tagen, bis der Beginn
+erreicht ist. Ältere Tage werden vollständig normalisiert, ihre
 umfangreichen Rohantworten aber nicht dauerhaft archiviert. Nach jedem Paket
 werden die Langzeitaggregate aktualisiert. Fehlende Garmin-Werte bleiben `null`.
 
