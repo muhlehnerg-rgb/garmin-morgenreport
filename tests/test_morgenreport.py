@@ -34,6 +34,47 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["timeout"], 20)
 
 
+class FirestoreRetryTests(unittest.TestCase):
+    @patch("morgenreport.time.sleep")
+    @patch("morgenreport.requests.get")
+    def test_timeout_wird_wiederholt(self, get, sleep):
+        erfolg = Mock(status_code=200)
+        get.side_effect = [morgenreport.requests.Timeout("langsam"), erfolg]
+
+        result = morgenreport.firestore_request("get", "https://firestore.test/doc")
+
+        self.assertIs(result, erfolg)
+        self.assertEqual(get.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    @patch("morgenreport.time.sleep")
+    @patch("morgenreport.requests.patch")
+    def test_temporaerer_http_status_wird_wiederholt(self, patch_request, sleep):
+        temporaer = Mock(status_code=503)
+        erfolg = Mock(status_code=200)
+        patch_request.side_effect = [temporaer, erfolg]
+
+        result = morgenreport.firestore_request(
+            "patch", "https://firestore.test/doc", json={"fields": {}}
+        )
+
+        self.assertIs(result, erfolg)
+        temporaer.close.assert_called_once()
+        sleep.assert_called_once_with(1)
+
+    @patch("morgenreport.time.sleep")
+    @patch("morgenreport.requests.get")
+    def test_fachlicher_http_fehler_wird_nicht_wiederholt(self, get, sleep):
+        verboten = Mock(status_code=403)
+        get.return_value = verboten
+
+        result = morgenreport.firestore_request("get", "https://firestore.test/doc")
+
+        self.assertIs(result, verboten)
+        get.assert_called_once()
+        sleep.assert_not_called()
+
+
 class ArgumentTests(unittest.TestCase):
     def test_dry_run_argument(self):
         self.assertTrue(morgenreport.parse_args(["--dry-run"]).dry_run)

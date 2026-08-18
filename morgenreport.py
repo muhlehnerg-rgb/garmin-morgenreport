@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import smtplib
+import time
 import requests
 import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -55,6 +56,8 @@ GARMIN_ROHDATEN_SCHEMA_VERSION = 1
 GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE = 90
 GARMIN_LANGZEIT_BATCH_TAGE = 28
 GARMIN_LANGZEIT_WOCHEN_LIMIT = 104
+FIRESTORE_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+FIRESTORE_RETRY_VERSUCHE = 3
 
 TOKEN_ORDNER = os.path.join(BASE_DIR, ".garmin_tokens")
 
@@ -595,9 +598,30 @@ def firestore_legacy_report_url():
     return f"{FIRESTORE_BASIS}/tracker/morgenreport_{quote(TRACKER_SECRET, safe='')}"
 
 
+def firestore_request(method, pfad, *, timeout=30, **kwargs):
+    """Wiederholt nur voruebergehende Firestore-Netzwerkfehler."""
+    request_fn = getattr(requests, method.lower())
+    for versuch in range(1, FIRESTORE_RETRY_VERSUCHE + 1):
+        try:
+            response = request_fn(pfad, timeout=timeout, **kwargs)
+        except (requests.Timeout, requests.ConnectionError):
+            if versuch >= FIRESTORE_RETRY_VERSUCHE:
+                raise
+        else:
+            if (
+                response.status_code not in FIRESTORE_RETRY_STATUS
+                or versuch >= FIRESTORE_RETRY_VERSUCHE
+            ):
+                return response
+            response.close()
+        time.sleep(2 ** (versuch - 1))
+
+    raise RuntimeError("Firestore-Anfrage konnte nicht ausgefuehrt werden")
+
+
 def hole_firestore_dokument(pfad):
     """Reads one IAM-protected Firestore document as ordinary Python data."""
-    resp = requests.get(pfad, headers=firestore_auth_headers(), timeout=30)
+    resp = firestore_request("get", pfad, headers=firestore_auth_headers(), timeout=30)
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
@@ -612,7 +636,8 @@ def schreibe_firestore_dokument(pfad, felder, feldmasken=None):
     params = None
     if feldmasken:
         params = [("updateMask.fieldPaths", field) for field in feldmasken]
-    resp = requests.patch(
+    resp = firestore_request(
+        "patch",
         pfad,
         headers=firestore_auth_headers(),
         params=params,
@@ -631,7 +656,8 @@ def hole_gewohnheiten():
     Der Zugriff erfolgt mit einem kurzlebigen Google-IAM-Token. HTTP-Fehler werden
     nicht verborgen; main() behandelt Gewohnheiten bewusst als optionale Ergänzung.
     """
-    resp = requests.get(
+    resp = firestore_request(
+        "get",
         firestore_user_url("tracker", "gewohnheiten"),
         headers=firestore_auth_headers(),
         timeout=15,
@@ -644,7 +670,8 @@ def hole_gewohnheiten():
 
 def hole_aktuellen_morgenreport_firestore():
     """Lädt das aktuelle Report-Dokument für abgegrenzte Nachläufe."""
-    resp = requests.get(
+    resp = firestore_request(
+        "get",
         firestore_user_url("health", "morning_report"),
         headers=firestore_auth_headers(),
         timeout=15,
@@ -842,7 +869,8 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
 
     # PATCH aktualisiert das feste "aktueller Report"-Dokument. Ein Timeout
     # verhindert, dass ein gestörter Firestore-Aufruf den Workflow endlos blockiert.
-    resp = requests.patch(
+    resp = firestore_request(
+        "patch",
         firestore_user_url("health", "morning_report"),
         headers=firestore_auth_headers(),
         json=body,
@@ -853,7 +881,8 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     # melden, obwohl der GPT am nächsten Morgen noch veraltete Daten erhält.
     resp.raise_for_status()
 
-    legacy_resp = requests.patch(
+    legacy_resp = firestore_request(
+        "patch",
         firestore_legacy_report_url(),
         headers=firestore_auth_headers(),
         json=body,
@@ -904,7 +933,8 @@ def schreibe_tageshistorie_firestore(daten, score, empfehlung, habit_quote, habi
     """Schreibt ein Tagesdokument als privates Gedächtnis für spätere Trends."""
     felder = tageshistorie_felder(daten, score, empfehlung, habit_quote, habit_ergebnisse)
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
-    resp = requests.patch(
+    resp = firestore_request(
+        "patch",
         firestore_user_url("health", "morning_report", "history", daten["datum"]),
         headers=firestore_auth_headers(),
         json=body,
@@ -936,7 +966,8 @@ def schreibe_schlaf_nachsynchronisierung_firestore(daten):
         firestore_user_url("health", "morning_report", "history", daten["datum"]),
         firestore_legacy_report_url(),
     ):
-        resp = requests.patch(
+        resp = firestore_request(
+            "patch",
             pfad,
             headers=firestore_auth_headers(),
             params=params,
@@ -958,7 +989,8 @@ def daterange(start, ende):
 
 def hole_historientag_firestore(tag):
     """Lädt ein einzelnes Tageshistorien-Dokument; fehlende Tage ergeben None."""
-    resp = requests.get(
+    resp = firestore_request(
+        "get",
         firestore_user_url("health", "morning_report", "history", tag),
         headers=firestore_auth_headers(),
         timeout=15,
@@ -972,7 +1004,8 @@ def hole_historientag_firestore(tag):
 
 def hole_historie_zeitraum(start, ende):
     """Loads a date range with one structured query instead of one HTTP call per day."""
-    resp = requests.post(
+    resp = firestore_request(
+        "post",
         f"{firestore_user_url('health', 'morning_report')}:runQuery",
         headers=firestore_auth_headers(),
         json={
@@ -1014,7 +1047,8 @@ def hole_historie_zeitraum(start, ende):
 
 def hole_garmin_rohmanifest_firestore(tag):
     """Lädt den Status des privaten Rohdatenarchivs für einen Historientag."""
-    resp = requests.get(
+    resp = firestore_request(
+        "get",
         firestore_user_url("health", "garmin_raw", "days", tag),
         headers=firestore_auth_headers(),
         timeout=15,
@@ -1032,7 +1066,8 @@ def aktualisiere_historientag_garmin_firestore(daten, score, empfehlung):
         for feld in GARMIN_HISTORIE_AKTUALISIERUNGSFELDER
     }
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
-    resp = requests.patch(
+    resp = firestore_request(
+        "patch",
         firestore_user_url("health", "morning_report", "history", daten["datum"]),
         headers=firestore_auth_headers(),
         params=[("updateMask.fieldPaths", feld) for feld in felder],
@@ -1056,7 +1091,8 @@ def _rohquelle_speicherformat(daten):
 
 def _patch_firestore_dokument(pfad, felder):
     body = {"fields": {k: firestore_wert_schreiben(v) for k, v in felder.items()}}
-    resp = requests.patch(
+    resp = firestore_request(
+        "patch",
         pfad,
         headers=firestore_auth_headers(),
         json=body,
@@ -1109,7 +1145,9 @@ def loesche_garmin_rohtag_firestore(tag):
 
     headers = firestore_auth_headers()
     quellen_url = firestore_user_url("health", "garmin_raw", "days", tag, "sources")
-    resp = requests.get(quellen_url, headers=headers, params={"pageSize": 100}, timeout=30)
+    resp = firestore_request(
+        "get", quellen_url, headers=headers, params={"pageSize": 100}, timeout=30
+    )
     resp.raise_for_status()
     for dokument in resp.json().get("documents", []):
         name = dokument.get("name")
@@ -1121,16 +1159,20 @@ def loesche_garmin_rohtag_firestore(tag):
         for index in range(1, int(teile) + 1):
             if int(teile) <= 1:
                 break
-            teil_resp = requests.delete(
+            teil_resp = firestore_request(
+                "delete",
                 f"{dokument_url}/chunks/{index:04d}", headers=headers, timeout=15
             )
             if teil_resp.status_code != 404:
                 teil_resp.raise_for_status()
-        quell_resp = requests.delete(dokument_url, headers=headers, timeout=15)
+        quell_resp = firestore_request(
+            "delete", dokument_url, headers=headers, timeout=15
+        )
         if quell_resp.status_code != 404:
             quell_resp.raise_for_status()
 
-    manifest_resp = requests.delete(
+    manifest_resp = firestore_request(
+        "delete",
         firestore_user_url("health", "garmin_raw", "days", tag),
         headers=headers,
         timeout=15,
@@ -1260,7 +1302,8 @@ def aktualisiere_schlafhistorie_spiegel(ende=None):
     historie = erstelle_schlafhistorie_spiegel(hole_historie_zeitraum(start, ende))
     feldname = "schlafhistorie_28_tage"
     body = {"fields": {feldname: firestore_wert_schreiben(historie)}}
-    resp = requests.patch(
+    resp = firestore_request(
+        "patch",
         firestore_legacy_report_url(),
         headers=firestore_auth_headers(),
         params=[("updateMask.fieldPaths", feldname)],
@@ -1577,7 +1620,8 @@ def schreibe_wochenreview_firestore(review):
         f"{review['woche_start']}_{review['woche_ende']}",
     )
     for url in (aktuelle_url, archiv_url):
-        resp = requests.patch(
+        resp = firestore_request(
+            "patch",
             url,
             headers=firestore_auth_headers(),
             json=body,
@@ -1606,7 +1650,8 @@ def schreibe_heutige_aktivitaeten_firestore(tag, aktivitaeten):
         firestore_user_url("health", "morning_report"),
         firestore_legacy_report_url(),
     ):
-        resp = requests.patch(
+        resp = firestore_request(
+            "patch",
             pfad,
             headers=firestore_auth_headers(),
             params=params,
