@@ -60,9 +60,15 @@ Erforderliche Repository-Variable:
 Firestore wird über GitHub OIDC und das dedizierte Google-Servicekonto
 `github-garmin-morgenreport@gewohnheitstracker-3b30a.iam.gserviceaccount.com`
 angesprochen. Dadurch liegen keine langlebigen Firestore-Zugangsdaten im
-Repository. Der private Morgenreport samt Historie bleibt unter dem Benutzerpfad;
-nur der aktuelle Report wird fuer den kostenlosen Cloudflare-Worker zusaetzlich
-in ein anonym lesbares, aber nicht anonym beschreibbares Legacy-Dokument gespiegelt.
+Repository. Der private Morgenreport samt vollständiger Historie bleibt unter dem
+Benutzerpfad. Für den kostenlosen Cloudflare-Worker werden der aktuelle Report
+und ein kompakter, rollierender Ausschnitt der letzten 28 Tage zusätzlich in ein
+anonym lesbares, aber nicht anonym beschreibbares Legacy-Dokument gespiegelt.
+Der Ausschnitt enthält nur Trendwerte und Aktivitäten, keine Notizen oder
+subjektive Einträge. Er wird nach jedem Morgenreport und nach einer
+Schlaf-Nachsynchronisierung automatisch erneuert. Damit entstehen keine neuen
+laufenden Dienste oder zusätzlichen Kosten; der bewusst akzeptierte Nachteil ist
+die geringere Vertraulichkeit dieses begrenzten Spiegels.
 
 Der Workflow verwendet `GARMIN_TOKENS_B64` als Startwert und als Passwort für einen verschlüsselten Token-Cache. Nach einem erfolgreichen Lauf wird ein erneuertes Garmin-Token verschlüsselt für den nächsten Lauf gespeichert.
 

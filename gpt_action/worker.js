@@ -135,7 +135,35 @@ async function loadFirestoreDocument(env) {
 async function loadMorgenreport(env) {
   const result = await loadFirestoreDocument(env);
   if (result.error) return result.error;
-  return json({ report: result.report });
+  const { schlafhistorie_28_tage: _historie, ...report } = result.report;
+  return json({ report });
+}
+
+/** Liefert einen begrenzten Ausschnitt der rollierenden Schlafhistorie. */
+async function loadSchlafhistorie(url, env) {
+  const rawDays = url.searchParams.get("tage");
+  const days = rawDays === null ? 28 : Number(rawDays);
+  if (!Number.isInteger(days) || days < 7 || days > 28) {
+    return json({ error: "tage must be an integer between 7 and 28" }, 400);
+  }
+
+  const result = await loadFirestoreDocument(env);
+  if (result.error) return result.error;
+  const stored = Array.isArray(result.report.schlafhistorie_28_tage)
+    ? result.report.schlafhistorie_28_tage
+    : [];
+  const data = stored
+    .filter((entry) => entry && typeof entry.datum === "string")
+    .sort((a, b) => a.datum.localeCompare(b.datum))
+    .slice(-days);
+
+  return json({
+    tage_angefragt: days,
+    tage_gefunden: data.length,
+    von: data[0]?.datum ?? null,
+    bis: data.at(-1)?.datum ?? null,
+    daten: data,
+  });
 }
 
 /**
@@ -268,10 +296,12 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Nur die fünf dokumentierten Kombinationen aus Methode und Pfad zulassen.
+    // Nur die sechs dokumentierten Kombinationen aus Methode und Pfad zulassen.
     // Freie Repository-, Workflow-, Firestore- oder Datumsparameter existieren
     // absichtlich nicht.
     const isReadRoute = request.method === "GET" && url.pathname === "/morgenreport";
+    const isSleepHistoryReadRoute =
+      request.method === "GET" && url.pathname === "/schlafhistorie";
     const isStartRoute =
       request.method === "POST" && url.pathname === "/morgenreport/start";
     const isStatusRoute =
@@ -281,7 +311,7 @@ export default {
     const isTodayActivitiesStartRoute =
       request.method === "POST" && url.pathname === "/aktivitaeten/heute/start";
     if (
-      !isReadRoute && !isStartRoute && !isStatusRoute &&
+      !isReadRoute && !isSleepHistoryReadRoute && !isStartRoute && !isStatusRoute &&
       !isTodayActivitiesReadRoute && !isTodayActivitiesStartRoute
     ) {
       return json({ error: "Not found" }, 404);
@@ -296,6 +326,7 @@ export default {
     }
 
     if (isReadRoute) return loadMorgenreport(env);
+    if (isSleepHistoryReadRoute) return loadSchlafhistorie(url, env);
     if (isStartRoute) return startMorgenreport(request, env);
     if (isTodayActivitiesReadRoute) return loadHeutigeAktivitaeten(env);
     if (isTodayActivitiesStartRoute) return startHeutigeAktivitaeten(request, env);

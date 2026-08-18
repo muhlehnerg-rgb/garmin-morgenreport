@@ -4,10 +4,11 @@
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
-  version: 2.0.0
+  version: 2.1.0
   description: >-
-    Liefert Geralds aktuellsten Garmin-Morgenreport und kann nach ausdrücklicher
-    Benutzerbestätigung den fest konfigurierten GitHub-Workflow starten.
+    Liefert Geralds aktuellsten Garmin-Morgenreport, eine rollierende
+    Schlafhistorie und kann nach ausdrücklicher Benutzerbestätigung den fest
+    konfigurierten GitHub-Workflow starten.
 servers:
   # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
   - url: https://garmin-morgenreport-gpt.muhlehner-g.workers.dev
@@ -140,6 +141,58 @@ paths:
           description: Die Worker-Secrets sind nicht vollständig konfiguriert.
         "502":
           description: Der Worker konnte den aktuellen Datensatz nicht aus Firestore laden.
+  /schlafhistorie:
+    get:
+      operationId: getSchlafhistorie
+      summary: Schlaf- und Erholungshistorie laden
+      description: >-
+        Lädt die letzten 7 bis 28 verfügbaren Tageswerte für Schlaf-, Erholungs-
+        und grobe Trainingsanalysen. Für Fragen nach Trends über mehrere Wochen
+        verwenden. tage_gefunden kann kleiner als tage_angefragt sein. Nullwerte
+        bedeuten "nicht verfügbar" und dürfen weder als Messwert 0 noch als
+        schlechter Wert interpretiert werden. Die Daten eignen sich für
+        persönliche Muster und keine medizinische Diagnose.
+      parameters:
+        - name: tage
+          in: query
+          required: false
+          description: Gewünschter Ausschnitt; ohne Angabe werden 28 Tage geliefert.
+          schema:
+            type: integer
+            minimum: 7
+            maximum: 28
+            default: 28
+      responses:
+        "200":
+          description: Rollierende Schlaf- und Erholungshistorie.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tage_angefragt, tage_gefunden, von, bis, daten]
+                properties:
+                  tage_angefragt:
+                    type: integer
+                  tage_gefunden:
+                    type: integer
+                  von:
+                    type: [string, "null"]
+                    description: Erster vorhandener Tag im Format YYYY-MM-DD.
+                  bis:
+                    type: [string, "null"]
+                    description: Letzter vorhandener Tag im Format YYYY-MM-DD.
+                  daten:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Schlafhistorientag"
+        "400":
+          description: tage ist keine ganze Zahl zwischen 7 und 28.
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig.
+        "500":
+          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
+        "502":
+          description: Der Worker konnte die Historie nicht aus Firestore laden.
   /morgenreport/start:
     post:
       operationId: startMorgenreport
@@ -319,6 +372,44 @@ paths:
           description: GitHub konnte den Laufstatus nicht liefern.
 components:
   schemas:
+    Schlafhistorientag:
+      type: object
+      required: [datum]
+      properties:
+        datum:
+          type: string
+          description: Datum im Format YYYY-MM-DD.
+        score:
+          type: [number, "null"]
+          description: Lokal berechneter Erholungsscore von 0 bis 100.
+        body_battery:
+          type: [number, "null"]
+        hrv:
+          type: [number, "null"]
+        ruhepuls:
+          type: [number, "null"]
+        schlafdauer_h:
+          type: [number, "null"]
+        schlaf_score:
+          type: [number, "null"]
+        tief_min:
+          type: [number, "null"]
+        rem_min:
+          type: [number, "null"]
+        leicht_min:
+          type: [number, "null"]
+        wach_min:
+          type: [number, "null"]
+        stress_avg:
+          type: [number, "null"]
+        schritte:
+          type: [number, "null"]
+        sleep_data_incomplete:
+          type: [boolean, "null"]
+        aktivitaeten_gestern:
+          type: array
+          items:
+            $ref: "#/components/schemas/Aktivitaet"
     Aktivitaet:
       type: object
       required: [name, typ]

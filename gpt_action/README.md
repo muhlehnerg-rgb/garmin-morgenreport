@@ -10,8 +10,8 @@ Zwischenschicht:
 ```text
 Garmin Connect
     -> morgenreport.py im GitHub-Workflow
-    -> privater Datensatz und read-only Spiegel in Firestore
-    -> GET /morgenreport im Cloudflare Worker
+    -> privater Datensatz und begrenzter read-only Spiegel in Firestore
+    -> GET /morgenreport oder GET /schlafhistorie im Cloudflare Worker
     -> Action des persönlichen Fitnesscoach-GPT
 ```
 
@@ -29,6 +29,9 @@ Fitnesscoach-GPT
 Der Worker akzeptiert keine freien Repository-, Workflow-, Firestore- oder
 Dokumentparameter. Dadurch kann das GPT ausschließlich den Morgenreport-Workflow
 starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
+Die Schlafhistorie ist auf die letzten 28 Tage und einen festen Satz aus Schlaf-,
+Erholungs-, Bewegungs- und Aktivitätswerten begrenzt. Private Notizen und
+subjektive Einträge werden nicht gespiegelt.
 
 Für eine aktuelle Abendabfrage gibt es einen zweiten, eng begrenzten Modus:
 
@@ -55,7 +58,9 @@ verändert den morgendlichen Versandmarker nicht.
 - `../morgenreport.py`: schreibt Einzelwerte und `report_text` in Firestore.
   `aktivitaeten_gestern` enthält zusätzlich alle von Garmin gelieferten
   Aktivitäten des Vortags als strukturierte Liste, ohne Typfilter. Der getrennte
-  Abendmodus aktualisiert nur `aktivitaeten_heute`, Datum und Zeitstempel.
+  Abendmodus aktualisiert nur `aktivitaeten_heute`, Datum und Zeitstempel. Nach
+  jedem vollständigen Report und jeder Schlaf-Nachsynchronisierung wird außerdem
+  der kompakte 28-Tage-Ausschnitt `schlafhistorie_28_tage` erneuert.
 - `../tests/test_morgenreport.py`: schützt den Firestore-Datenvertrag vor
   unbeabsichtigten Änderungen.
 
@@ -106,11 +111,16 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 2. Authentication auf **API key** und **Bearer** stellen.
 3. Als Schlüssel ausschließlich den Wert von `ACTION_API_KEY` eintragen.
 4. Den vollständigen Inhalt von `openapi.yaml` als Schema einfügen.
-5. `getAktuellenMorgenreport`, `startMorgenreport`,
+5. `getAktuellenMorgenreport`, `getSchlafhistorie`, `startMorgenreport`,
    `getHeutigeAktivitaeten`, `startHeutigeAktivitaetenAktualisierung` und
    `getMorgenreportStatus` in der Vorschau testen.
 6. In den GPT-Anweisungen festlegen:
    - Vor jeder Tagesanalyse den aktuellen Report laden und dessen Datum prüfen.
+   - Bei Fragen nach Schlaf-, Erholungs- oder Trainingstrends über mehrere Tage
+     `getSchlafhistorie` mit 7 bis 28 Tagen aufrufen. `tage_gefunden`, `von` und
+     `bis` nennen, wenn Daten fehlen oder der Zeitraum nicht vollständig ist.
+   - Erst dann um Garmin-Exporte oder Screenshots bitten, wenn die Historie nicht
+     genügend Tage enthält oder die benötigte Kennzahl darin nicht verfügbar ist.
    - `startMorgenreport` nur nach ausdrücklicher Aufforderung oder Bestätigung
      durch Gerald mit `{ "confirmed": true }` aufrufen.
    - Die zurückgegebene `run_id` mit `getMorgenreportStatus` prüfen.
@@ -132,7 +142,7 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 
 ## Erwartetes Verhalten und Fehler
 
-- `200`: JSON mit `{ "report": { ... } }`.
+- `200`: JSON mit dem aktuellen Report oder der angeforderten Schlafhistorie.
 - `202`: GitHub-Workflow wurde angenommen; `status=started` enthält normalerweise
   `run_id` und `run_url`. Bei `status=started_without_tracking` wurde der Workflow
   angenommen, aber GitHub hat keine Lauf-ID zurückgegeben.
@@ -144,8 +154,10 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
   Dienst lehnt den Aufruf ab. Interne Fehlermeldungen werden nicht weitergegeben.
 
 Der GPT sollte nie behaupten, aktuelle Daten zu analysieren, wenn `datum` nicht
-dem heutigen Datum entspricht. `null` bedeutet fehlender Messwert, nicht null
-Punkte und nicht Messwert 0.
+dem heutigen Datum entspricht. Bei der Historie sind `von`, `bis` und
+`tage_gefunden` maßgeblich. `null` bedeutet fehlender Messwert, nicht null Punkte
+und nicht Messwert 0. Trends sind persönliche Hinweise und keine medizinische
+Diagnose.
 
 ## Wartung
 

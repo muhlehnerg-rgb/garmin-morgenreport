@@ -26,10 +26,11 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 2. `erstelle_text()` erzeugt denselben vollständigen Bericht für Datei, Telegram
    und Firestore.
 3. `schreibe_morgenreport_firestore()` überschreibt das feste Dokument für den
-   aktuellsten Report.
+   aktuellsten Report und erneuert den begrenzten 28-Tage-Historienspiegel.
 4. `gpt_action/worker.js` authentifiziert den GPT per Bearer-Schlüssel, liest das
    feste Dokument, startet den festen Workflow und filtert dessen Statusantwort.
-5. `gpt_action/openapi.yaml` beschreibt die Lese-, Start- und Status-Actions.
+5. `gpt_action/openapi.yaml` beschreibt die Report-, Historien-, Start- und
+   Status-Actions.
 6. Im Abendmodus liest `morgenreport.py --heutige-aktivitaeten` nur den heutigen
    Garmin-Tag und aktualisiert per Firestore-Update-Mask ausschließlich
    `aktivitaeten_heute`, dessen Datum und dessen Aktualisierungszeit.
@@ -44,6 +45,9 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
   versenden und keinen `.last_sent_date.txt`-Marker schreiben.
 - `operationId: getAktuellenMorgenreport` stabil halten, da GPT-Anweisungen darauf
   Bezug nehmen können.
+- `operationId: getSchlafhistorie` stabil halten. Diese Route darf ausschließlich
+  7 bis 28 Tage aus dem festen Spiegel liefern und keine freien Firestore- oder
+  Datumsparameter erhalten.
 - Auch `startMorgenreport` und `getMorgenreportStatus` stabil halten. Der Start
   muss fest auf `main` und `.github/workflows/morgenreport.yml` begrenzt bleiben.
 - `getHeutigeAktivitaeten` und `startHeutigeAktivitaetenAktualisierung` ebenfalls

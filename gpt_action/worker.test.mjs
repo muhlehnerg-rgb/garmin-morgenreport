@@ -33,14 +33,24 @@ test("unbekannte Routen bleiben gesperrt", async () => {
 });
 
 test("alle bekannten Routen verlangen den Action-Bearer", async () => {
-  const response = await worker.fetch(
+  const requests = [
+    new Request("https://worker.example/morgenreport"),
+    new Request("https://worker.example/schlafhistorie?tage=28"),
+    new Request("https://worker.example/morgenreport/status?run_id=1"),
+    new Request("https://worker.example/aktivitaeten/heute"),
     new Request("https://worker.example/morgenreport/start", {
       method: "POST",
       body: JSON.stringify({ confirmed: true }),
     }),
-    env,
-  );
-  assert.equal(response.status, 401);
+    new Request("https://worker.example/aktivitaeten/heute/start", {
+      method: "POST",
+      body: JSON.stringify({ confirmed: true }),
+    }),
+  ];
+  for (const request of requests) {
+    const response = await worker.fetch(request, env);
+    assert.equal(response.status, 401);
+  }
 });
 
 test("Workflow-Start verlangt ausdrueckliche Bestaetigung", async () => {
@@ -220,6 +230,12 @@ test("Leseroute decodiert weiterhin den Firestore-Bericht", async () => {
           }],
         },
       },
+      schlafhistorie_28_tage: {
+        arrayValue: { values: [{ mapValue: { fields: {
+          datum: { stringValue: "2026-07-12" },
+          schlafdauer_h: { doubleValue: 7.1 },
+        } } }] },
+      },
     },
   });
   try {
@@ -243,6 +259,57 @@ test("Leseroute decodiert weiterhin den Firestore-Bericht", async () => {
         }],
       },
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Schlafhistorie wird sortiert, begrenzt und getrennt ausgegeben", async () => {
+  const originalFetch = globalThis.fetch;
+  const values = Array.from({ length: 9 }, (_, index) => ({
+    mapValue: { fields: {
+      datum: { stringValue: `2026-07-${String(9 - index).padStart(2, "0")}` },
+      schlafdauer_h: index === 2 ? { nullValue: null } : { doubleValue: 7 + index / 10 },
+      schlaf_score: { integerValue: String(80 + index) },
+      aktivitaeten_gestern: { arrayValue: { values: [] } },
+    } },
+  }));
+  globalThis.fetch = async () => Response.json({
+    fields: { schlafhistorie_28_tage: { arrayValue: { values } } },
+  });
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.example/schlafhistorie?tage=7", { headers: authHeaders }),
+      env,
+    );
+    assert.equal(response.status, 200);
+    const body = await responseJson(response);
+    assert.equal(body.tage_angefragt, 7);
+    assert.equal(body.tage_gefunden, 7);
+    assert.equal(body.von, "2026-07-03");
+    assert.equal(body.bis, "2026-07-09");
+    assert.equal(body.daten.length, 7);
+    assert.equal(body.daten[0].datum, "2026-07-03");
+    assert.equal(body.daten[4].schlafdauer_h, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Schlafhistorie lehnt ungueltige Tagesanzahl vor Firestore ab", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    return Response.json({});
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.example/schlafhistorie?tage=29", { headers: authHeaders }),
+      env,
+    );
+    assert.equal(response.status, 400);
+    assert.equal(fetchCalled, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

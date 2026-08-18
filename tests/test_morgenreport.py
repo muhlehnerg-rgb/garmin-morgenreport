@@ -174,8 +174,9 @@ class FirestoreTests(unittest.TestCase):
         self.secret_patcher.stop()
         self.uid_patcher.stop()
 
+    @patch("morgenreport.aktualisiere_schlafhistorie_spiegel")
     @patch("morgenreport.requests.patch")
-    def test_vollstaendiger_report_wird_gespeichert(self, patch_request):
+    def test_vollstaendiger_report_wird_gespeichert(self, patch_request, historie_spiegel):
         patch_request.return_value.raise_for_status.return_value = None
         daten = {
             "datum": "2026-07-13", "body_battery": 50, "ruhepuls": 55,
@@ -232,6 +233,7 @@ class FirestoreTests(unittest.TestCase):
         self.assertEqual(historie_fields["notizen"], {"nullValue": None})
         self.assertEqual(historie_fields["subjektive_energie"], {"nullValue": None})
         self.assertIn("gewohnheiten", historie_fields)
+        historie_spiegel.assert_called_once_with(date(2026, 7, 13))
 
     @patch("morgenreport.requests.patch")
     def test_abendaktualisierung_aendert_nur_heutige_aktivitaetsfelder(self, patch_request):
@@ -269,8 +271,11 @@ class FirestoreTests(unittest.TestCase):
             {"stringValue": "Abendlauf"},
         )
 
+    @patch("morgenreport.aktualisiere_schlafhistorie_spiegel")
     @patch("morgenreport.requests.patch")
-    def test_schlaf_nachsynchronisierung_aendert_nur_schlaf_und_recovery(self, patch_request):
+    def test_schlaf_nachsynchronisierung_aendert_nur_schlaf_und_recovery(
+        self, patch_request, historie_spiegel
+    ):
         patch_request.return_value.raise_for_status.return_value = None
         daten = {
             "datum": "2026-07-24", "body_battery": 72, "ruhepuls": 51,
@@ -307,6 +312,41 @@ class FirestoreTests(unittest.TestCase):
         self.assertEqual(fields["schlaf_score"], {"integerValue": "82"})
         self.assertEqual(fields["sleep_data_incomplete"], {"booleanValue": False})
         self.assertIn("/tracker/morgenreport_legacy-test-key", patch_request.call_args_list[2].args[0])
+        historie_spiegel.assert_called_once_with(date(2026, 7, 24))
+
+    @patch("morgenreport.requests.patch")
+    @patch("morgenreport.hole_historie_zeitraum")
+    def test_schlafhistorie_wird_kompakt_begrenzt_und_gespiegelt(
+        self, hole_historie, patch_request
+    ):
+        hole_historie.return_value = [
+            {
+                "datum": f"2026-07-{tag:02d}",
+                "schlafdauer_h": 7.0,
+                "hrv": None if tag == 3 else 45,
+                "notizen": "privat",
+                "aktivitaeten_gestern": [],
+            }
+            for tag in range(30, 0, -1)
+        ]
+        patch_request.return_value.raise_for_status.return_value = None
+
+        historie = morgenreport.aktualisiere_schlafhistorie_spiegel(date(2026, 7, 30))
+
+        self.assertEqual(len(historie), 28)
+        self.assertEqual(historie[0]["datum"], "2026-07-03")
+        self.assertEqual(historie[-1]["datum"], "2026-07-30")
+        self.assertIsNone(historie[0]["hrv"])
+        self.assertNotIn("notizen", historie[0])
+        hole_historie.assert_called_once_with(date(2026, 7, 3), date(2026, 7, 30))
+        self.assertEqual(
+            patch_request.call_args.kwargs["params"],
+            [("updateMask.fieldPaths", "schlafhistorie_28_tage")],
+        )
+        gespeicherte_historie = morgenreport.firestore_wert_lesen(
+            patch_request.call_args.kwargs["json"]["fields"]["schlafhistorie_28_tage"]
+        )
+        self.assertEqual(gespeicherte_historie, historie)
 
     def test_wochenreview_berechnet_trends_und_gewohnheiten(self):
         tage = []

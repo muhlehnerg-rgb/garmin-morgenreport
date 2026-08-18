@@ -574,6 +574,7 @@ def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, repor
     legacy_resp.raise_for_status()
 
     schreibe_tageshistorie_firestore(daten, score, empfehlung, habit_quote, habit_ergebnisse)
+    aktualisiere_schlafhistorie_spiegel(date.fromisoformat(daten["datum"]))
 
 
 def tageshistorie_felder(daten, score=None, empfehlung=None, habit_quote=None, habit_ergebnisse=None):
@@ -653,6 +654,7 @@ def schreibe_schlaf_nachsynchronisierung_firestore(daten):
             timeout=15,
         )
         resp.raise_for_status()
+    aktualisiere_schlafhistorie_spiegel(date.fromisoformat(daten["datum"]))
     return aktualisiert_am
 
 
@@ -686,6 +688,58 @@ def hole_historie_zeitraum(start, ende):
         if eintrag:
             tage.append(eintrag)
     return tage
+
+
+SCHLAFHISTORIE_FELDER = (
+    "datum",
+    "score",
+    "body_battery",
+    "hrv",
+    "ruhepuls",
+    "schlafdauer_h",
+    "schlaf_score",
+    "tief_min",
+    "rem_min",
+    "leicht_min",
+    "wach_min",
+    "stress_avg",
+    "schritte",
+    "sleep_data_incomplete",
+    "aktivitaeten_gestern",
+)
+
+
+def kompakter_schlafhistorientag(eintrag):
+    """Begrenzt einen privaten Historientag auf die Felder der GPT-Trendanalyse."""
+    return {feld: eintrag.get(feld) for feld in SCHLAFHISTORIE_FELDER}
+
+
+def erstelle_schlafhistorie_spiegel(tage, limit=28):
+    """Sortiert, bereinigt und begrenzt die rollierende Historie."""
+    gueltige_tage = [
+        eintrag for eintrag in tage
+        if isinstance(eintrag, dict) and isinstance(eintrag.get("datum"), str)
+    ]
+    gueltige_tage.sort(key=lambda eintrag: eintrag["datum"])
+    return [kompakter_schlafhistorientag(eintrag) for eintrag in gueltige_tage[-limit:]]
+
+
+def aktualisiere_schlafhistorie_spiegel(ende=None):
+    """Spiegelt maximal 28 private Tageswerte in das feste GPT-Dokument."""
+    ende = ende or date.today()
+    start = ende - timedelta(days=27)
+    historie = erstelle_schlafhistorie_spiegel(hole_historie_zeitraum(start, ende))
+    feldname = "schlafhistorie_28_tage"
+    body = {"fields": {feldname: firestore_wert_schreiben(historie)}}
+    resp = requests.patch(
+        firestore_legacy_report_url(),
+        headers=firestore_auth_headers(),
+        params=[("updateMask.fieldPaths", feldname)],
+        json=body,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return historie
 
 
 def durchschnitt(werte):
