@@ -73,8 +73,9 @@ die geringere Vertraulichkeit dieses begrenzten Spiegels.
 ## Garmin-Historie und einmaliger Rückimport
 
 Der vollständige Morgenreport pflegt automatisch eine rollierende Historie der
-letzten 28 Tage. Fehlende Tage werden aus Garmin Connect nachgeladen. Dabei gibt
-es zwei getrennte Ebenen:
+letzten 28 Tage. Zusätzlich kann die gesamte Garmin-Historie ab dem ersten
+Garmin-Jahr fortsetzbar rückwärts importiert werden. Dabei gibt es drei getrennte
+Ebenen:
 
 - `users/{uid}/health/morning_report/history/{datum}` enthält normalisierte
   Tageswerte für Trends, unter anderem Schlaf, HRV, Stress, Bewegung,
@@ -86,11 +87,15 @@ es zwei getrennte Ebenen:
   Rohdaten werden 90 Tage aufbewahrt, damit der Speicherverbrauch im kostenlosen
   Firebase-Rahmen begrenzt bleibt; die kleinen normalisierten Tageswerte bleiben
   für langfristige Vergleiche erhalten.
+- `users/{uid}/health/garmin_aggregates` enthält kompakte Wochen-, Monats-,
+  Quartals- und Jahreswerte. Der Importfortschritt liegt getrennt unter
+  `users/{uid}/health/garmin_import` und erlaubt eine sichere Fortsetzung.
 
-Der öffentliche GPT-Spiegel enthält nur die normalisierten Analysewerte, niemals
-die umfangreichen Rohantworten. Da auch Körper- und Trainingswerte im begrenzten
-Spiegel enthalten sein können, gilt weiterhin das bewusst akzeptierte
-Vertraulichkeitsrisiko der anonym lesbaren Garmin-Brücke.
+Der öffentliche GPT-Spiegel enthält nur die normalisierten 28-Tage-Werte und
+kompakten Langzeitaggregate, niemals die umfangreichen Rohantworten oder privaten
+Tagesdokumente. Da auch Körper- und Trainingswerte in diesen Aggregaten enthalten
+sein können, gilt weiterhin das bewusst akzeptierte Vertraulichkeitsrisiko der
+anonym lesbaren Garmin-Brücke.
 
 Ein einmaliger Rückimport kann ohne Versand eines neuen Reports gestartet werden:
 
@@ -103,6 +108,28 @@ In GitHub Actions steht dafür beim manuellen Start der Schalter
 die das jeweilige Garmin-Gerät nicht liefert, bleiben fehlend und werden nicht als
 Messwert 0 gespeichert. Nach dem ersten Rückimport wächst die Historie mit jedem
 Morgenreport automatisch weiter.
+
+### Vollständiger Langzeitimport
+
+Der Langzeitimport ermittelt ohne Angabe von `--von` das Jahr der ältesten
+Garmin-Aktivität und beginnt am 1. Januar dieses Jahres. Ein abweichender Beginn
+kann ausdrücklich angegeben werden:
+
+```powershell
+python morgenreport.py --garmin-langzeitimport
+python morgenreport.py --garmin-langzeitimport --von 2020-01-01 --batch-tage 28
+```
+
+Jeder Lauf bearbeitet höchstens 7 bis 90 Tage und speichert anschließend seinen
+Checkpoint. GitHub Actions startet standardmäßig täglich ein Paket mit 28 Tagen,
+bis der Beginn erreicht ist. Ältere Tage werden vollständig normalisiert, ihre
+umfangreichen Rohantworten aber nicht dauerhaft archiviert. Nach jedem Paket
+werden die Langzeitaggregate aktualisiert. Fehlende Garmin-Werte bleiben `null`.
+
+Im manuellen GitHub-Start stehen `long_term_backfill`, `history_start_date` und
+`history_batch_days` zur Verfügung. Ein anderer Starttermin setzt den bisherigen
+Fortschritt bewusst auf diesen neuen Zeitraum. Der Ablauf benötigt weder einen
+kostenpflichtigen Firebase-Tarif noch eine zusätzliche KI-API.
 
 Der Workflow verwendet `GARMIN_TOKENS_B64` als Startwert und als Passwort für einen verschlüsselten Token-Cache. Nach einem erfolgreichen Lauf wird ein erneuertes Garmin-Token verschlüsselt für den nächsten Lauf gespeichert.
 

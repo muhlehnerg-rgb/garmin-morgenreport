@@ -11,7 +11,7 @@ Zwischenschicht:
 Garmin Connect
     -> morgenreport.py im GitHub-Workflow
     -> privater Datensatz und begrenzter read-only Spiegel in Firestore
-    -> GET /morgenreport oder GET /schlafhistorie im Cloudflare Worker
+    -> GET /morgenreport, /schlafhistorie oder /langzeitvergleich im Worker
     -> Action des persönlichen Fitnesscoach-GPT
 ```
 
@@ -29,10 +29,11 @@ Fitnesscoach-GPT
 Der Worker akzeptiert keine freien Repository-, Workflow-, Firestore- oder
 Dokumentparameter. Dadurch kann das GPT ausschließlich den Morgenreport-Workflow
 starten und keine anderen GitHub-Aktionen oder Firestore-Daten erreichen.
-Die Schlafhistorie ist auf die letzten 28 Tage und einen festen Satz aus Schlaf-,
-Erholungs-, Bewegungs-, Körper- und Aktivitätswerten begrenzt. Dazu zählen nur
-normalisierte Kennzahlen; die privaten Garmin-Rohantworten, Notizen und
-subjektiven Einträge werden nicht gespiegelt.
+Die Tageshistorie ist auf die letzten 28 Tage begrenzt. Für längere Vergleiche
+liefert `/langzeitvergleich` ausschließlich vorberechnete Wochen-, Monats-,
+Quartals- und Jahresaggregate. Pro Aufruf sind höchstens zwölf ausdrücklich
+erlaubte Kennzahlen möglich. Private Garmin-Rohantworten, Notizen und subjektive
+Einträge werden nicht gespiegelt.
 
 Für eine aktuelle Abendabfrage gibt es einen zweiten, eng begrenzten Modus:
 
@@ -64,6 +65,8 @@ verändert den morgendlichen Versandmarker nicht.
   der kompakte 28-Tage-Ausschnitt `schlafhistorie_28_tage` erneuert. Ein manueller
   Garmin-Rückimport ergänzt fehlende Historientage und archiviert die Rohquellen
   ausschließlich im privaten Benutzerpfad.
+- `../history_analytics.py`: berechnet aus privaten Tageswerten deterministische
+  Wochen-, Monats-, Quartals- und Jahresaggregate einschließlich Datenabdeckung.
 - `../tests/test_morgenreport.py`: schützt den Firestore-Datenvertrag vor
   unbeabsichtigten Änderungen.
 
@@ -114,7 +117,7 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 2. Authentication auf **API key** und **Bearer** stellen.
 3. Als Schlüssel ausschließlich den Wert von `ACTION_API_KEY` eintragen.
 4. Den vollständigen Inhalt von `openapi.yaml` als Schema einfügen.
-5. `getAktuellenMorgenreport`, `getSchlafhistorie`, `startMorgenreport`,
+5. `getAktuellenMorgenreport`, `getSchlafhistorie`, `getLangzeitvergleich`, `startMorgenreport`,
    `getHeutigeAktivitaeten`, `startHeutigeAktivitaetenAktualisierung` und
    `getMorgenreportStatus` in der Vorschau testen.
 6. In den GPT-Anweisungen festlegen:
@@ -122,6 +125,10 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
    - Bei Fragen nach Schlaf-, Erholungs- oder Trainingstrends über mehrere Tage
      `getSchlafhistorie` mit 7 bis 28 Tagen aufrufen. `tage_gefunden`, `von` und
      `bis` nennen, wenn Daten fehlen oder der Zeitraum nicht vollständig ist.
+   - Für längere Zeiträume `getLangzeitvergleich` mit passender Ebene verwenden:
+     Wochen für Details, Monate für mittlere Zeiträume, Quartale oder Jahre für
+     langfristige Entwicklung. Nur die benötigten Kennzahlen anfordern und die
+     jeweiligen Verfügbarkeitszahlen nennen.
    - Erst dann um Garmin-Exporte oder Screenshots bitten, wenn die Historie nicht
      genügend Tage enthält oder die benötigte Kennzahl darin nicht verfügbar ist.
    - `startMorgenreport` nur nach ausdrücklicher Aufforderung oder Bestätigung
@@ -145,7 +152,7 @@ der Start- und Statusaufruf funktionieren dann bis zur Erneuerung nicht.
 
 ## Erwartetes Verhalten und Fehler
 
-- `200`: JSON mit dem aktuellen Report oder der angeforderten Schlafhistorie.
+- `200`: JSON mit aktuellem Report, 28-Tage-Historie oder Langzeitaggregaten.
 - `202`: GitHub-Workflow wurde angenommen; `status=started` enthält normalerweise
   `run_id` und `run_url`. Bei `status=started_without_tracking` wurde der Workflow
   angenommen, aber GitHub hat keine Lauf-ID zurückgegeben.

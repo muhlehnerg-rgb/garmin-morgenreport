@@ -25,6 +25,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from garminconnect import Garmin
 from dotenv import load_dotenv
+from history_analytics import aggregate_history
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -52,6 +53,8 @@ TRACKER_SECRET = os.environ.get("TRACKER_SECRET", "")
 _FIRESTORE_CREDENTIALS = None
 GARMIN_ROHDATEN_SCHEMA_VERSION = 1
 GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE = 90
+GARMIN_LANGZEIT_BATCH_TAGE = 28
+GARMIN_LANGZEIT_WOCHEN_LIMIT = 104
 
 TOKEN_ORDNER = os.path.join(BASE_DIR, ".garmin_tokens")
 
@@ -592,6 +595,36 @@ def firestore_legacy_report_url():
     return f"{FIRESTORE_BASIS}/tracker/morgenreport_{quote(TRACKER_SECRET, safe='')}"
 
 
+def hole_firestore_dokument(pfad):
+    """Reads one IAM-protected Firestore document as ordinary Python data."""
+    resp = requests.get(pfad, headers=firestore_auth_headers(), timeout=30)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return {
+        key: firestore_wert_lesen(value)
+        for key, value in resp.json().get("fields", {}).items()
+    }
+
+
+def schreibe_firestore_dokument(pfad, felder, feldmasken=None):
+    """Writes a Firestore document and optionally limits the updated fields."""
+    params = None
+    if feldmasken:
+        params = [("updateMask.fieldPaths", field) for field in feldmasken]
+    resp = requests.patch(
+        pfad,
+        headers=firestore_auth_headers(),
+        params=params,
+        json={"fields": {
+            key: firestore_wert_schreiben(value) for key, value in felder.items()
+        }},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return felder
+
+
 def hole_gewohnheiten():
     """Lädt die Tracker-Konfiguration für die Auswertung des Vortags.
 
@@ -725,6 +758,26 @@ GARMIN_HISTORIE_AKTUALISIERUNGSFELDER = (
     "sleep_data_incomplete",
     *GARMIN_ANALYSE_ZUSATZFELDER,
 )
+
+
+GARMIN_TAGESBELEG_FELDER = (
+    "body_battery", "hrv", "ruhepuls", "schlafdauer_h", "schlaf_score",
+    "tief_min", "rem_min", "leicht_min", "wach_min", "stress_avg", "schritte",
+    "spo2", "atemfrequenz", "aktivitaeten_gestern", "kalorien_gesamt",
+    "kalorien_aktiv", "distanz_km", "puls_min", "puls_max", "body_battery_min",
+    "body_battery_max", "body_battery_geladen", "body_battery_verbraucht",
+    "aktiv_min", "hochaktiv_min", "sitzend_min", "intensitaet_mod_min",
+    "intensitaet_vig_min", "stockwerke_auf", "stockwerke_ab", "fluessigkeit_ml",
+)
+
+
+def hat_garmin_analysewerte(daten):
+    """Returns true only when a day has date-specific wearable evidence."""
+    for field in GARMIN_TAGESBELEG_FELDER:
+        value = daten.get(field)
+        if value is not None and value != [] and value != {}:
+            return True
+    return False
 
 
 def schreibe_morgenreport_firestore(daten, score, empfehlung, habit_quote, report_text, habit_ergebnisse=None):
@@ -918,12 +971,44 @@ def hole_historientag_firestore(tag):
 
 
 def hole_historie_zeitraum(start, ende):
-    """Lädt vorhandene Tageshistorien-Dokumente für einen kompakten Zeitraum."""
+    """Loads a date range with one structured query instead of one HTTP call per day."""
+    resp = requests.post(
+        f"{firestore_user_url('health', 'morning_report')}:runQuery",
+        headers=firestore_auth_headers(),
+        json={
+            "structuredQuery": {
+                "from": [{"collectionId": "history"}],
+                "where": {
+                    "compositeFilter": {
+                        "op": "AND",
+                        "filters": [
+                            {"fieldFilter": {
+                                "field": {"fieldPath": "datum"},
+                                "op": "GREATER_THAN_OR_EQUAL",
+                                "value": {"stringValue": start.isoformat()},
+                            }},
+                            {"fieldFilter": {
+                                "field": {"fieldPath": "datum"},
+                                "op": "LESS_THAN_OR_EQUAL",
+                                "value": {"stringValue": ende.isoformat()},
+                            }},
+                        ],
+                    }
+                },
+                "orderBy": [{
+                    "field": {"fieldPath": "datum"},
+                    "direction": "ASCENDING",
+                }],
+            }
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
     tage = []
-    for tag in daterange(start, ende):
-        eintrag = hole_historientag_firestore(tag)
-        if eintrag:
-            tage.append(eintrag)
+    for result in resp.json():
+        fields = result.get("document", {}).get("fields")
+        if fields:
+            tage.append({key: firestore_wert_lesen(value) for key, value in fields.items()})
     return tage
 
 
@@ -1055,10 +1140,15 @@ def loesche_garmin_rohtag_firestore(tag):
     return True
 
 
-def synchronisiere_garmin_historie(client, ende=None, tage=28, vorab_daten=None):
-    """Füllt fehlende Tageswerte und Rohdaten im rollierenden Zeitraum nach."""
+def synchronisiere_garmin_historie(
+    client, ende=None, tage=28, vorab_daten=None, start=None, spiegel_ende=None
+):
+    """Fills normalized history and retains raw sources only for 90 days."""
     ende = ende or date.today()
-    start = ende - timedelta(days=tage - 1)
+    start = start or (ende - timedelta(days=tage - 1))
+    if start > ende:
+        raise ValueError("Startdatum liegt nach dem Enddatum")
+    tage = (ende - start).days + 1
     vorab_daten = vorab_daten or {}
     ergebnis = {
         "geprueft": tage,
@@ -1067,16 +1157,20 @@ def synchronisiere_garmin_historie(client, ende=None, tage=28, vorab_daten=None)
         "rohtage_ergaenzt": 0,
         "rohtage_entfernt": 0,
         "uebersprungen": 0,
+        "ohne_daten": 0,
     }
 
+    roh_ab = date.today() - timedelta(days=GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE - 1)
     for tag in daterange(start, ende):
+        tag_datum = date.fromisoformat(tag)
+        roh_erforderlich = tag_datum >= roh_ab
         historie = hole_historientag_firestore(tag)
-        manifest = hole_garmin_rohmanifest_firestore(tag)
+        manifest = hole_garmin_rohmanifest_firestore(tag) if roh_erforderlich else None
         roh_aktuell = (
             isinstance(manifest, dict)
             and manifest.get("schema_version") == GARMIN_ROHDATEN_SCHEMA_VERSION
         )
-        if historie is not None and roh_aktuell:
+        if historie is not None and (roh_aktuell or not roh_erforderlich):
             ergebnis["uebersprungen"] += 1
             continue
 
@@ -1084,6 +1178,10 @@ def synchronisiere_garmin_historie(client, ende=None, tage=28, vorab_daten=None)
         daten = vorab_daten.get(tag)
         if daten is None:
             daten = hole_tagesdaten(client, tag)
+
+        if not hat_garmin_analysewerte(daten):
+            ergebnis["ohne_daten"] += 1
+            continue
 
         score, _ = berechne_erholung(daten)
         empfehlung, _ = trainingsempfehlung(score)
@@ -1094,7 +1192,7 @@ def synchronisiere_garmin_historie(client, ende=None, tage=28, vorab_daten=None)
             aktualisiere_historientag_garmin_firestore(daten, score, empfehlung)
             ergebnis["historientage_aktualisiert"] += 1
 
-        if not roh_aktuell:
+        if roh_erforderlich and not roh_aktuell:
             schreibe_garmin_rohquellen_firestore(
                 tag,
                 daten.get("_garmin_rohquellen", {}),
@@ -1103,8 +1201,8 @@ def synchronisiere_garmin_historie(client, ende=None, tage=28, vorab_daten=None)
             ergebnis["rohtage_ergaenzt"] += 1
 
     if ergebnis["historientage_ergaenzt"] or ergebnis["historientage_aktualisiert"]:
-        aktualisiere_schlafhistorie_spiegel(ende)
-    abgelaufen = ende - timedelta(days=GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE)
+        aktualisiere_schlafhistorie_spiegel(spiegel_ende or ende)
+    abgelaufen = date.today() - timedelta(days=GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE)
     try:
         if loesche_garmin_rohtag_firestore(abgelaufen.isoformat()):
             ergebnis["rohtage_entfernt"] = 1
@@ -1171,6 +1269,156 @@ def aktualisiere_schlafhistorie_spiegel(ende=None):
     )
     resp.raise_for_status()
     return historie
+
+
+def aktualisiere_langzeitaggregate(start, ende=None):
+    """Builds compact long-term series from private normalized daily records."""
+    ende = ende or date.today()
+    tage = hole_historie_zeitraum(start, ende)
+    serien = aggregate_history(tage)
+    serien["week"] = serien["week"][-GARMIN_LANGZEIT_WOCHEN_LIMIT:]
+    gueltige_tage = sorted(
+        item["datum"] for item in tage
+        if isinstance(item, dict) and isinstance(item.get("datum"), str)
+    )
+    metadata = {
+        "von": gueltige_tage[0] if gueltige_tage else None,
+        "bis": gueltige_tage[-1] if gueltige_tage else None,
+        "tage_gefunden": len(gueltige_tage),
+        "wochen_limit": GARMIN_LANGZEIT_WOCHEN_LIMIT,
+        "aktualisiert_am": datetime.now(ZoneInfo("Europe/Vienna")).isoformat(
+            timespec="seconds"
+        ),
+    }
+    felder = {
+        "langzeit_metadaten": metadata,
+        "langzeit_wochen": serien["week"],
+        "langzeit_monate": serien["month"],
+        "langzeit_quartale": serien["quarter"],
+        "langzeit_jahre": serien["year"],
+    }
+    masken = list(felder)
+    for pfad in (
+        firestore_user_url("health", "garmin_aggregates"),
+        firestore_legacy_report_url(),
+    ):
+        schreibe_firestore_dokument(pfad, felder, masken)
+    return {"metadata": metadata, **serien}
+
+
+def hole_langzeitimport_status_firestore():
+    """Loads the resumable long-term import checkpoint."""
+    return hole_firestore_dokument(firestore_user_url("health", "garmin_import"))
+
+
+def schreibe_langzeitimport_status_firestore(status):
+    """Persists one checkpoint without exposing it through the GPT bridge."""
+    return schreibe_firestore_dokument(
+        firestore_user_url("health", "garmin_import"), status
+    )
+
+
+def _activity_date(activity):
+    for key in ("startTimeLocal", "startTimeGMT", "beginTimestamp", "date"):
+        value = activity.get(key) if isinstance(activity, dict) else None
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                continue
+    return None
+
+
+def ermittle_erstes_garmin_jahr(client, ende=None):
+    """Finds the year of the oldest Garmin activity with a one-item query."""
+    ende = ende or date.today()
+    connectapi = getattr(client, "connectapi", None)
+    activities_url = getattr(client, "garmin_connect_activities", None)
+    if not callable(connectapi) or not activities_url:
+        raise RuntimeError("Garmin-Startdatum nicht automatisch ermittelbar; --von angeben")
+    activities = connectapi(
+        activities_url,
+        params={
+            "startDate": "2000-01-01",
+            "endDate": ende.isoformat(),
+            "start": "0",
+            "limit": "1",
+            "sortOrder": "asc",
+        },
+    )
+    oldest = _activity_date(activities[0]) if activities else None
+    if oldest is None:
+        raise RuntimeError("Keine historische Garmin-Aktivität gefunden; --von angeben")
+    return date(oldest.year, 1, 1)
+
+
+def synchronisiere_garmin_langzeit(
+    client, start=None, ende=None, batch_tage=GARMIN_LANGZEIT_BATCH_TAGE
+):
+    """Imports one backwards batch and updates resumable progress and aggregates."""
+    ende = ende or date.today()
+    status = hole_langzeitimport_status_firestore() or {}
+    if start is None and status.get("start_date"):
+        start = date.fromisoformat(status["start_date"])
+    start = start or ermittle_erstes_garmin_jahr(client, ende)
+    if start > ende:
+        raise ValueError("Startdatum liegt nach dem Enddatum")
+
+    gleicher_start = status.get("start_date") == start.isoformat()
+    if gleicher_start and status.get("status") == "in_progress" and status.get("end_date"):
+        ende = date.fromisoformat(status["end_date"])
+    if gleicher_start and status.get("next_end_date"):
+        naechstes_ende = date.fromisoformat(status["next_end_date"])
+    elif gleicher_start and status.get("status") == "completed":
+        aggregate = aktualisiere_langzeitaggregate(start, ende)
+        refreshed = {
+            **status,
+            "end_date": ende.isoformat(),
+            "total_days": (ende - start).days + 1,
+            "processed_days": (ende - start).days + 1,
+            "remaining_days": 0,
+            "progress_percent": 100.0,
+            "updated_at": datetime.now(ZoneInfo("Europe/Vienna")).isoformat(
+                timespec="seconds"
+            ),
+        }
+        schreibe_langzeitimport_status_firestore(refreshed)
+        return {**refreshed, "aggregate": aggregate["metadata"], "already_completed": True}
+    else:
+        naechstes_ende = ende
+
+    batch_ende = min(naechstes_ende, ende)
+    batch_start = max(start, batch_ende - timedelta(days=batch_tage - 1))
+    import_result = synchronisiere_garmin_historie(
+        client,
+        start=batch_start,
+        ende=batch_ende,
+        spiegel_ende=ende,
+    )
+    following_end = batch_start - timedelta(days=1)
+    completed = following_end < start
+    total_days = (ende - start).days + 1
+    remaining_days = 0 if completed else (following_end - start).days + 1
+    imported_days = total_days - remaining_days
+    new_status = {
+        "status": "completed" if completed else "in_progress",
+        "start_date": start.isoformat(),
+        "end_date": ende.isoformat(),
+        "last_batch_from": batch_start.isoformat(),
+        "last_batch_to": batch_ende.isoformat(),
+        "next_end_date": None if completed else following_end.isoformat(),
+        "total_days": total_days,
+        "processed_days": imported_days,
+        "remaining_days": remaining_days,
+        "progress_percent": round(imported_days / total_days * 100, 1),
+        "updated_at": datetime.now(ZoneInfo("Europe/Vienna")).isoformat(
+            timespec="seconds"
+        ),
+        "last_result": import_result,
+    }
+    schreibe_langzeitimport_status_firestore(new_status)
+    aggregate = aktualisiere_langzeitaggregate(start, ende)
+    return {**new_status, "aggregate": aggregate["metadata"]}
 
 
 def durchschnitt(werte):
@@ -1668,6 +1916,13 @@ def sende_telegram(text):
     print("Telegram-Nachricht gesendet.")
 
 
+def argparse_iso_date(value):
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Datum muss YYYY-MM-DD entsprechen") from exc
+
+
 def parse_args(argv=None):
     """Definiert CLI-Optionen separat, damit sie ohne echten Start testbar sind."""
     parser = argparse.ArgumentParser(description="Garmin-Morgenreport erstellen und versenden")
@@ -1697,12 +1952,30 @@ def parse_args(argv=None):
         help="Fehlende Garmin-Tageswerte und private Rohquellen nach Firestore importieren",
     )
     parser.add_argument(
+        "--garmin-langzeitimport",
+        action="store_true",
+        help="Vollständige Garmin-Historie paketweise und fortsetzbar importieren",
+    )
+    parser.add_argument(
         "--tage",
         type=int,
         default=28,
         choices=range(7, 29),
         metavar="7..28",
         help="Zeitraum für den Garmin-Rückimport (Standard: 28 Tage)",
+    )
+    parser.add_argument(
+        "--von",
+        type=argparse_iso_date,
+        help="Optionaler Beginn des Langzeitimports im Format YYYY-MM-DD",
+    )
+    parser.add_argument(
+        "--batch-tage",
+        type=int,
+        default=GARMIN_LANGZEIT_BATCH_TAGE,
+        choices=range(7, 91),
+        metavar="7..90",
+        help="Tage pro fortsetzbarem Langzeitlauf (Standard: 28)",
     )
     return parser.parse_args(argv)
 
@@ -1730,7 +2003,32 @@ def main(argv=None):
             f"{sync['historientage_ergaenzt']} Tageswerte und "
             f"{sync['historientage_aktualisiert']} vorhandene Tage aktualisiert, "
             f"{sync['rohtage_ergaenzt']} Rohdatentage ergänzt; "
-            f"{sync['uebersprungen']} bereits vollständig."
+            f"{sync['uebersprungen']} bereits vollständig, "
+            f"{sync['ohne_daten']} ohne Garmin-Daten."
+        )
+        return 0
+
+    if args.garmin_langzeitimport:
+        if args.dry_run:
+            print("TESTMODUS: Garmin-Langzeitimport ohne Schreibzugriff übersprungen.")
+            return 0
+        start_hinweis = args.von.isoformat() if args.von else "automatisch ab erstem Garmin-Jahr"
+        print(
+            f"Starte fortsetzbaren Garmin-Langzeitimport ({start_hinweis}, "
+            f"{args.batch_tage} Tage pro Lauf)..."
+        )
+        sync = synchronisiere_garmin_langzeit(
+            client, start=args.von, batch_tage=args.batch_tage
+        )
+        print(
+            "Garmin-Langzeitimport: "
+            f"{sync['status']}, {sync['processed_days']}/{sync['total_days']} Tage "
+            f"({sync['progress_percent']} %), noch {sync['remaining_days']} Tage."
+        )
+        print(
+            "Langzeitvergleich aktualisiert: "
+            f"{sync['aggregate']['tage_gefunden']} Tage von "
+            f"{sync['aggregate']['von']} bis {sync['aggregate']['bis']}."
         )
         return 0
 

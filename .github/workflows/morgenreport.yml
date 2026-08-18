@@ -2,6 +2,7 @@ name: Morgenreport
 
 on:
   schedule:
+    - cron: "30 2 * * *"
     - cron: "0 8 * * *"
     - cron: "30 8 * * *"
     - cron: "0 9 * * *"
@@ -36,13 +37,28 @@ on:
         required: false
         type: boolean
         default: false
+      long_term_backfill:
+        description: "Nächstes Paket der vollständigen Garmin-Historie importieren"
+        required: false
+        type: boolean
+        default: false
+      history_start_date:
+        description: "Optionaler Beginn YYYY-MM-DD; leer = erstes Garmin-Jahr"
+        required: false
+        type: string
+        default: ""
+      history_batch_days:
+        description: "Tage pro Langzeitlauf (7 bis 90)"
+        required: false
+        type: string
+        default: "28"
 
 permissions:
   contents: write
   id-token: write
 
 concurrency:
-  group: morgenreport-${{ github.event.inputs.activities_only || 'daily' }}-${{ github.event.inputs.sleep_resync || 'normal' }}-${{ github.event.inputs.weekly_review || 'regular' }}-${{ github.event.inputs.history_backfill || 'no-backfill' }}
+  group: morgenreport-${{ github.event.inputs.activities_only || 'daily' }}-${{ github.event.inputs.sleep_resync || 'normal' }}-${{ github.event.inputs.weekly_review || 'regular' }}-${{ github.event.inputs.history_backfill || 'no-backfill' }}-${{ github.event.inputs.long_term_backfill || 'no-long-term' }}
   cancel-in-progress: false
 
 jobs:
@@ -61,7 +77,10 @@ jobs:
           WOCHENTAG=$(TZ=Europe/Vienna date +%u)
           echo "Heute (Wien): $HEUTE, Stunde: $STUNDE, Wochentag: $WOCHENTAG"
 
-          if [ "$github_event_name" = "schedule" ] && [ "$WOCHENTAG" = "7" ] && [ "$STUNDE" -ge 19 ]; then
+          if [ "$github_event_name" = "schedule" ] && [ "$github_event_schedule" = "30 2 * * *" ]; then
+            echo "Nächtlicher Langzeitimport."
+            echo "LONG_TERM_BACKFILL=true" >> "$GITHUB_ENV"
+          elif [ "$github_event_name" = "schedule" ] && [ "$WOCHENTAG" = "7" ] && [ "$STUNDE" -ge 19 ]; then
             echo "Sonntagabend: Wochenreview."
             echo "WEEKLY_REVIEW=true" >> "$GITHUB_ENV"
           elif [ "$github_event_name" = "schedule" ] && [ "$STUNDE" -ge 18 ]; then
@@ -81,6 +100,7 @@ jobs:
 
         env:
           github_event_name: ${{ github.event_name }}
+          github_event_schedule: ${{ github.event.schedule }}
 
       - name: Python einrichten
         if: env.SKIP != 'true'
@@ -135,6 +155,9 @@ jobs:
           INPUT_SLEEP_RESYNC: ${{ inputs.sleep_resync }}
           INPUT_WEEKLY_REVIEW: ${{ inputs.weekly_review }}
           INPUT_HISTORY_BACKFILL: ${{ inputs.history_backfill }}
+          INPUT_LONG_TERM_BACKFILL: ${{ inputs.long_term_backfill }}
+          HISTORY_START_DATE: ${{ inputs.history_start_date }}
+          HISTORY_BATCH_DAYS: ${{ inputs.history_batch_days }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -147,7 +170,18 @@ jobs:
           FIRESTORE_USER_UID: ${{ vars.FIRESTORE_USER_UID }}
           TRACKER_SECRET: ${{ secrets.TRACKER_SECRET }}
         run: |
-          if [ "$INPUT_HISTORY_BACKFILL" = "true" ]; then
+          if [ "$LONG_TERM_BACKFILL" = "true" ] || [ "$INPUT_LONG_TERM_BACKFILL" = "true" ]; then
+            BATCH_DAYS="${HISTORY_BATCH_DAYS:-28}"
+            EXTRA_ARGS=()
+            if [ -n "$HISTORY_START_DATE" ]; then
+              EXTRA_ARGS+=(--von "$HISTORY_START_DATE")
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              python morgenreport.py --garmin-langzeitimport --batch-tage "$BATCH_DAYS" "${EXTRA_ARGS[@]}" --dry-run
+            else
+              python morgenreport.py --garmin-langzeitimport --batch-tage "$BATCH_DAYS" "${EXTRA_ARGS[@]}"
+            fi
+          elif [ "$INPUT_HISTORY_BACKFILL" = "true" ]; then
             if [ "$DRY_RUN" = "true" ]; then
               python morgenreport.py --garmin-rueckimport --dry-run
             else
@@ -196,7 +230,7 @@ jobs:
       - name: Heutiges Datum als "gesendet" markieren
         # Ein reiner Aktivitätsabruf versendet keinen Morgenreport und darf daher
         # auch nicht den Marker für einen erfolgreichen Tagesversand verändern.
-        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true && inputs.sleep_resync != true && inputs.weekly_review != true && inputs.history_backfill != true && env.SLEEP_RESYNC != 'true' && env.WEEKLY_REVIEW != 'true'
+        if: env.SKIP != 'true' && success() && inputs.dry_run != true && inputs.activities_only != true && inputs.sleep_resync != true && inputs.weekly_review != true && inputs.history_backfill != true && inputs.long_term_backfill != true && env.SLEEP_RESYNC != 'true' && env.WEEKLY_REVIEW != 'true' && env.LONG_TERM_BACKFILL != 'true'
         run: |
           TZ=Europe/Vienna date +%Y-%m-%d > .last_sent_date.txt
           git config user.name "Morgenreport Bot"

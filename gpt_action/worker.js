@@ -37,6 +37,32 @@ const GITHUB_WORKFLOW_URL =
   "https://github.com/muhlehnerg-rgb/garmin-morgenreport/actions/workflows/morgenreport.yml";
 const GITHUB_API_VERSION = "2026-03-10";
 
+const LONG_TERM_FIELDS = {
+  week: "langzeit_wochen",
+  month: "langzeit_monate",
+  quarter: "langzeit_quartale",
+  year: "langzeit_jahre",
+};
+const LONG_TERM_LIMITS = { week: 104, month: 120, quarter: 80, year: 30 };
+const LONG_TERM_METRICS = new Set([
+  "score", "body_battery", "hrv", "ruhepuls", "schlafdauer_h",
+  "schlaf_score", "tief_min", "rem_min", "leicht_min", "wach_min",
+  "stress_avg", "schritte", "spo2", "atemfrequenz", "tr_score", "vo2max",
+  "kalorien_gesamt", "kalorien_aktiv", "distanz_km", "puls_min", "puls_max",
+  "body_battery_min", "body_battery_max", "body_battery_geladen",
+  "body_battery_verbraucht", "aktiv_min", "hochaktiv_min", "sitzend_min",
+  "intensitaet_mod_min", "intensitaet_vig_min", "stockwerke_auf",
+  "stockwerke_ab", "fluessigkeit_ml", "gewicht_kg", "bmi",
+  "koerperfett_pct", "fitnessalter", "ausdauer_score",
+  "aktivitaeten_anzahl", "aktivitaeten_dauer_min",
+  "aktivitaeten_distanz_km", "aktivitaeten_kalorien",
+]);
+const DEFAULT_LONG_TERM_METRICS = [
+  "schlafdauer_h", "schlaf_score", "hrv", "ruhepuls", "body_battery_max",
+  "stress_avg", "schritte", "intensitaet_mod_min", "intensitaet_vig_min",
+  "vo2max", "aktivitaeten_anzahl", "aktivitaeten_dauer_min",
+];
+
 /**
  * Erzeugt für Erfolg und Fehler immer dieselbe saubere JSON-Antwortstruktur.
  * `no-store` ist absichtlich gesetzt: Gesundheitsdaten sollen weder bei
@@ -135,7 +161,15 @@ async function loadFirestoreDocument(env) {
 async function loadMorgenreport(env) {
   const result = await loadFirestoreDocument(env);
   if (result.error) return result.error;
-  const { schlafhistorie_28_tage: _historie, ...report } = result.report;
+  const {
+    schlafhistorie_28_tage: _historie,
+    langzeit_metadaten: _langzeitMeta,
+    langzeit_wochen: _langzeitWochen,
+    langzeit_monate: _langzeitMonate,
+    langzeit_quartale: _langzeitQuartale,
+    langzeit_jahre: _langzeitJahre,
+    ...report
+  } = result.report;
   return json({ report });
 }
 
@@ -163,6 +197,80 @@ async function loadSchlafhistorie(url, env) {
     von: data[0]?.datum ?? null,
     bis: data.at(-1)?.datum ?? null,
     daten: data,
+  });
+}
+
+function validIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function selectMetrics(source, metrics) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  return Object.fromEntries(
+    metrics.filter((metric) => Object.hasOwn(source, metric))
+      .map((metric) => [metric, source[metric]]),
+  );
+}
+
+function compactLongTermPeriod(period, metrics) {
+  return {
+    periode: period.periode ?? null,
+    von: period.von ?? null,
+    bis: period.bis ?? null,
+    tage_gefunden: period.tage_gefunden ?? 0,
+    mittelwerte: selectMetrics(period.mittelwerte, metrics),
+    summen: selectMetrics(period.summen, metrics),
+    minima: selectMetrics(period.minima, metrics),
+    maxima: selectMetrics(period.maxima, metrics),
+    werte_verfuegbar: selectMetrics(period.werte_verfuegbar, metrics),
+    aktivitaetstypen: period.aktivitaetstypen ?? {},
+    kategorien: period.kategorien ?? {},
+  };
+}
+
+/** Returns bounded long-term aggregates without exposing private daily records. */
+async function loadLangzeitvergleich(url, env) {
+  const level = url.searchParams.get("ebene") || "month";
+  if (!Object.hasOwn(LONG_TERM_FIELDS, level)) {
+    return json({ error: "ebene must be week, month, quarter or year" }, 400);
+  }
+  const from = url.searchParams.get("von");
+  const to = url.searchParams.get("bis");
+  if ((from && !validIsoDate(from)) || (to && !validIsoDate(to)) || (from && to && from > to)) {
+    return json({ error: "von and bis must be valid YYYY-MM-DD values" }, 400);
+  }
+
+  const rawMetrics = url.searchParams.get("kennzahlen");
+  const metrics = rawMetrics
+    ? [...new Set(rawMetrics.split(",").map((item) => item.trim()).filter(Boolean))]
+    : DEFAULT_LONG_TERM_METRICS;
+  if (metrics.length < 1 || metrics.length > 12 || metrics.some((item) => !LONG_TERM_METRICS.has(item))) {
+    return json({ error: "kennzahlen must contain 1 to 12 supported values" }, 400);
+  }
+
+  const result = await loadFirestoreDocument(env);
+  if (result.error) return result.error;
+  const stored = Array.isArray(result.report[LONG_TERM_FIELDS[level]])
+    ? result.report[LONG_TERM_FIELDS[level]]
+    : [];
+  const periods = stored
+    .filter((period) => period && typeof period.von === "string" && typeof period.bis === "string")
+    .filter((period) => (!from || period.bis >= from) && (!to || period.von <= to))
+    .sort((a, b) => a.von.localeCompare(b.von));
+
+  if (periods.length > LONG_TERM_LIMITS[level]) {
+    return json({ error: "Requested range is too large; narrow von and bis" }, 400);
+  }
+  return json({
+    ebene: level,
+    von: periods[0]?.von ?? null,
+    bis: periods.at(-1)?.bis ?? null,
+    perioden_gefunden: periods.length,
+    kennzahlen: metrics,
+    datenbasis: result.report.langzeit_metadaten ?? null,
+    daten: periods.map((period) => compactLongTermPeriod(period, metrics)),
   });
 }
 
@@ -296,12 +404,14 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Nur die sechs dokumentierten Kombinationen aus Methode und Pfad zulassen.
+    // Nur die dokumentierten Kombinationen aus Methode und Pfad zulassen.
     // Freie Repository-, Workflow-, Firestore- oder Datumsparameter existieren
     // absichtlich nicht.
     const isReadRoute = request.method === "GET" && url.pathname === "/morgenreport";
     const isSleepHistoryReadRoute =
       request.method === "GET" && url.pathname === "/schlafhistorie";
+    const isLongTermReadRoute =
+      request.method === "GET" && url.pathname === "/langzeitvergleich";
     const isStartRoute =
       request.method === "POST" && url.pathname === "/morgenreport/start";
     const isStatusRoute =
@@ -311,7 +421,7 @@ export default {
     const isTodayActivitiesStartRoute =
       request.method === "POST" && url.pathname === "/aktivitaeten/heute/start";
     if (
-      !isReadRoute && !isSleepHistoryReadRoute && !isStartRoute && !isStatusRoute &&
+      !isReadRoute && !isSleepHistoryReadRoute && !isLongTermReadRoute && !isStartRoute && !isStatusRoute &&
       !isTodayActivitiesReadRoute && !isTodayActivitiesStartRoute
     ) {
       return json({ error: "Not found" }, 404);
@@ -327,6 +437,7 @@ export default {
 
     if (isReadRoute) return loadMorgenreport(env);
     if (isSleepHistoryReadRoute) return loadSchlafhistorie(url, env);
+    if (isLongTermReadRoute) return loadLangzeitvergleich(url, env);
     if (isStartRoute) return startMorgenreport(request, env);
     if (isTodayActivitiesReadRoute) return loadHeutigeAktivitaeten(env);
     if (isTodayActivitiesStartRoute) return startHeutigeAktivitaeten(request, env);

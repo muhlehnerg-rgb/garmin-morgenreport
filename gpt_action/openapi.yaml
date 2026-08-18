@@ -4,11 +4,10 @@
 openapi: 3.1.0
 info:
   title: Garmin Morgenreport API
-  version: 2.1.0
+  version: 3.0.0
   description: >-
-    Liefert Geralds aktuellsten Garmin-Morgenreport, eine rollierende
-    Schlafhistorie und kann nach ausdrücklicher Benutzerbestätigung den fest
-    konfigurierten GitHub-Workflow starten.
+    Liefert Geralds Morgenreport, eine 28-Tage-Historie und Langzeitaggregate.
+    Nach ausdrücklicher Bestätigung kann der feste GitHub-Workflow starten.
 servers:
   # Kein abschließender Schrägstrich, da der Pfad unten bereits mit / beginnt.
   - url: https://garmin-morgenreport-gpt.muhlehner-g.workers.dev
@@ -238,6 +237,127 @@ paths:
           description: Die Worker-Secrets sind nicht vollständig konfiguriert.
         "502":
           description: Der Worker konnte die Historie nicht aus Firestore laden.
+  /langzeitvergleich:
+    get:
+      operationId: getLangzeitvergleich
+      summary: Garmin-Langzeitwerte vergleichen
+      description: >-
+        Liefert kompakte Wochen-, Monats-, Quartals- oder Jahresaggregate. Nutze
+        nur benötigte Kennzahlen und nenne Datenabdeckung sowie fehlende Werte.
+      parameters:
+        - name: ebene
+          in: query
+          required: false
+          description: Zeitliche Gruppierung; Standard ist month.
+          schema:
+            type: string
+            enum: [week, month, quarter, year]
+            default: month
+        - name: von
+          in: query
+          required: false
+          description: Optionaler Beginn im Format YYYY-MM-DD.
+          schema:
+            type: string
+            format: date
+        - name: bis
+          in: query
+          required: false
+          description: Optionales Ende im Format YYYY-MM-DD.
+          schema:
+            type: string
+            format: date
+        - name: kennzahlen
+          in: query
+          required: false
+          description: Kommagetrennte Liste mit 1 bis 12 Kennzahlen; leer nutzt Kernwerte.
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 12
+            items:
+              type: string
+              enum:
+                - score
+                - body_battery
+                - hrv
+                - ruhepuls
+                - schlafdauer_h
+                - schlaf_score
+                - tief_min
+                - rem_min
+                - leicht_min
+                - wach_min
+                - stress_avg
+                - schritte
+                - spo2
+                - atemfrequenz
+                - tr_score
+                - vo2max
+                - kalorien_gesamt
+                - kalorien_aktiv
+                - distanz_km
+                - puls_min
+                - puls_max
+                - body_battery_min
+                - body_battery_max
+                - body_battery_geladen
+                - body_battery_verbraucht
+                - aktiv_min
+                - hochaktiv_min
+                - sitzend_min
+                - intensitaet_mod_min
+                - intensitaet_vig_min
+                - stockwerke_auf
+                - stockwerke_ab
+                - fluessigkeit_ml
+                - gewicht_kg
+                - bmi
+                - koerperfett_pct
+                - fitnessalter
+                - ausdauer_score
+                - aktivitaeten_anzahl
+                - aktivitaeten_dauer_min
+                - aktivitaeten_distanz_km
+                - aktivitaeten_kalorien
+      responses:
+        "200":
+          description: Gefilterte Langzeitaggregate mit Verfügbarkeitszahlen.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ebene, von, bis, perioden_gefunden, kennzahlen, daten]
+                properties:
+                  ebene:
+                    type: string
+                  von:
+                    type: [string, "null"]
+                  bis:
+                    type: [string, "null"]
+                  perioden_gefunden:
+                    type: integer
+                  kennzahlen:
+                    type: array
+                    items:
+                      type: string
+                  datenbasis:
+                    type: [object, "null"]
+                    additionalProperties: true
+                  daten:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Langzeitperiode"
+        "400":
+          description: Zeitraum, Ebene oder Kennzahlen sind ungültig oder zu umfangreich.
+        "401":
+          description: API-Schlüssel fehlt oder ist ungültig.
+        "500":
+          description: Die Worker-Secrets sind nicht vollständig konfiguriert.
+        "502":
+          description: Der Worker konnte die Aggregate nicht aus Firestore laden.
   /morgenreport/start:
     post:
       operationId: startMorgenreport
@@ -417,6 +537,48 @@ paths:
           description: GitHub konnte den Laufstatus nicht liefern.
 components:
   schemas:
+    Langzeitperiode:
+      type: object
+      required: [periode, von, bis, tage_gefunden]
+      properties:
+        periode:
+          type: [string, "null"]
+        von:
+          type: [string, "null"]
+        bis:
+          type: [string, "null"]
+        tage_gefunden:
+          type: integer
+        mittelwerte:
+          type: object
+          additionalProperties:
+            type: number
+        summen:
+          type: object
+          additionalProperties:
+            type: number
+        minima:
+          type: object
+          additionalProperties:
+            type: number
+        maxima:
+          type: object
+          additionalProperties:
+            type: number
+        werte_verfuegbar:
+          type: object
+          additionalProperties:
+            type: integer
+        aktivitaetstypen:
+          type: object
+          additionalProperties:
+            type: integer
+        kategorien:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
     Schlafhistorientag:
       type: object
       required: [datum]

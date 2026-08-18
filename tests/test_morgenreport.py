@@ -60,6 +60,14 @@ class ArgumentTests(unittest.TestCase):
         self.assertTrue(args.garmin_rueckimport)
         self.assertEqual(args.tage, 21)
 
+    def test_garmin_langzeitimport_argumente(self):
+        args = morgenreport.parse_args([
+            "--garmin-langzeitimport", "--von", "2021-01-01", "--batch-tage", "42",
+        ])
+        self.assertTrue(args.garmin_langzeitimport)
+        self.assertEqual(args.von, date(2021, 1, 1))
+        self.assertEqual(args.batch_tage, 42)
+
 
 class AktivitaetsTests(unittest.TestCase):
     def test_alle_aktivitaetstypen_werden_geladen_und_normalisiert(self):
@@ -261,6 +269,27 @@ class GarminHistorienDatenTests(unittest.TestCase):
 
 
 class FirestoreTests(unittest.TestCase):
+    @patch("morgenreport.firestore_auth_headers", return_value={"Authorization": "Bearer test"})
+    @patch("morgenreport.requests.post")
+    def test_historienzeitraum_nutzt_eine_sortierte_firestore_abfrage(
+        self, post_request, _headers
+    ):
+        post_request.return_value.json.return_value = [{"document": {"fields": {
+            "datum": {"stringValue": "2026-08-01"},
+            "hrv": {"integerValue": "45"},
+        }}}]
+        post_request.return_value.raise_for_status.return_value = None
+
+        result = morgenreport.hole_historie_zeitraum(
+            date(2026, 8, 1), date(2026, 8, 31)
+        )
+
+        self.assertEqual(result, [{"datum": "2026-08-01", "hrv": 45}])
+        self.assertTrue(post_request.call_args.args[0].endswith("/morning_report:runQuery"))
+        query = post_request.call_args.kwargs["json"]["structuredQuery"]
+        self.assertEqual(query["from"], [{"collectionId": "history"}])
+        self.assertEqual(query["orderBy"][0]["direction"], "ASCENDING")
+
     def setUp(self):
         self.uid_patcher = patch.object(morgenreport, "FIRESTORE_USER_UID", "test-user")
         self.secret_patcher = patch.object(morgenreport, "TRACKER_SECRET", "legacy-test-key")
@@ -610,6 +639,109 @@ class FirestoreTests(unittest.TestCase):
         loesche_rohtag.assert_called_once_with("2026-05-20")
 
 
+class GarminLangzeitImportTests(unittest.TestCase):
+    def test_erstes_garmin_jahr_nutzt_aelteste_aktivitaet(self):
+        client = Mock()
+        client.garmin_connect_activities = "/activitylist-service/activities/search/activities"
+        client.connectapi.return_value = [{"startTimeLocal": "2021-06-12 08:30:00"}]
+
+        result = morgenreport.ermittle_erstes_garmin_jahr(
+            client, ende=date(2026, 8, 18)
+        )
+
+        self.assertEqual(result, date(2021, 1, 1))
+        self.assertEqual(client.connectapi.call_args.kwargs["params"]["sortOrder"], "asc")
+        self.assertEqual(client.connectapi.call_args.kwargs["params"]["limit"], "1")
+
+    @patch("morgenreport.aktualisiere_langzeitaggregate")
+    @patch("morgenreport.schreibe_langzeitimport_status_firestore")
+    @patch("morgenreport.synchronisiere_garmin_historie")
+    @patch("morgenreport.hole_langzeitimport_status_firestore", return_value=None)
+    def test_langzeitimport_speichert_fortsetzbaren_rueckwaerts_checkpoint(
+        self, _status, synchronisiere, schreibe_status, aggregate
+    ):
+        synchronisiere.return_value = {
+            "historientage_ergaenzt": 28,
+            "historientage_aktualisiert": 0,
+            "rohtage_ergaenzt": 28,
+            "uebersprungen": 0,
+            "ohne_daten": 0,
+        }
+        aggregate.return_value = {"metadata": {
+            "von": "2026-07-22", "bis": "2026-08-18", "tage_gefunden": 28,
+        }}
+
+        with patch("morgenreport.ZoneInfo", return_value=None):
+            result = morgenreport.synchronisiere_garmin_langzeit(
+                Mock(),
+                start=date(2024, 1, 1),
+                ende=date(2026, 8, 18),
+                batch_tage=28,
+            )
+
+        self.assertEqual(result["status"], "in_progress")
+        self.assertEqual(result["processed_days"], 28)
+        self.assertEqual(result["next_end_date"], "2026-07-21")
+        synchronisiere.assert_called_once_with(
+            ANY,
+            start=date(2026, 7, 22),
+            ende=date(2026, 8, 18),
+            spiegel_ende=date(2026, 8, 18),
+        )
+        schreibe_status.assert_called_once()
+
+    @patch("morgenreport.aktualisiere_schlafhistorie_spiegel")
+    @patch("morgenreport.loesche_garmin_rohtag_firestore", return_value=False)
+    @patch("morgenreport.schreibe_garmin_rohquellen_firestore")
+    @patch("morgenreport.schreibe_tageshistorie_firestore")
+    @patch("morgenreport.hole_tagesdaten")
+    @patch("morgenreport.hole_garmin_rohmanifest_firestore")
+    @patch("morgenreport.hole_historientag_firestore", return_value=None)
+    def test_alte_tage_werden_normalisiert_aber_nicht_roh_archiviert(
+        self, _historie, hole_manifest, hole_daten, schreibe_historie,
+        schreibe_roh, _loesche_roh, _spiegel
+    ):
+        hole_daten.return_value = {
+            "datum": "2020-01-01", "body_battery": None,
+            "schlaf_score": None, "schlafdauer_h": None, "hrv": None,
+            "stress_avg": None, "tr_score": None, "schritte": 4321,
+            "_garmin_rohquellen": {"sleep": {}}, "_garmin_quellen_fehler": [],
+        }
+
+        result = morgenreport.synchronisiere_garmin_historie(
+            Mock(), start=date(2020, 1, 1), ende=date(2020, 1, 1)
+        )
+
+        self.assertEqual(result["historientage_ergaenzt"], 1)
+        self.assertEqual(result["rohtage_ergaenzt"], 0)
+        hole_manifest.assert_not_called()
+        schreibe_historie.assert_called_once()
+        schreibe_roh.assert_not_called()
+
+    @patch("morgenreport.aktualisiere_schlafhistorie_spiegel")
+    @patch("morgenreport.loesche_garmin_rohtag_firestore", return_value=False)
+    @patch("morgenreport.schreibe_tageshistorie_firestore")
+    @patch("morgenreport.hole_tagesdaten")
+    @patch("morgenreport.hole_garmin_rohmanifest_firestore")
+    @patch("morgenreport.hole_historientag_firestore", return_value=None)
+    def test_leere_vor_garmin_tage_werden_nicht_als_daten_gespeichert(
+        self, _historie, _manifest, hole_daten, schreibe_historie,
+        _loesche_roh, _spiegel
+    ):
+        hole_daten.return_value = {
+            "datum": "2020-01-01", "sleep_data_incomplete": True,
+            "_garmin_rohquellen": {}, "_garmin_quellen_fehler": [],
+        }
+
+        result = morgenreport.synchronisiere_garmin_historie(
+            Mock(), start=date(2020, 1, 1), ende=date(2020, 1, 1)
+        )
+
+        self.assertEqual(result["ohne_daten"], 1)
+        self.assertEqual(result["historientage_ergaenzt"], 0)
+        schreibe_historie.assert_not_called()
+
+
 class MainTests(unittest.TestCase):
     def setUp(self):
         self.daten = {
@@ -701,6 +833,7 @@ class MainTests(unittest.TestCase):
             "historientage_aktualisiert": 8,
             "rohtage_ergaenzt": 28,
             "uebersprungen": 0,
+            "ohne_daten": 0,
         }
 
         self.assertEqual(

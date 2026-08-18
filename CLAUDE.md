@@ -29,11 +29,13 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
    aktuellsten Report und erneuert den begrenzten 28-Tage-Historienspiegel.
    `synchronisiere_garmin_historie()` ergänzt fehlende normalisierte Tageswerte
    und archiviert umfangreiche Garmin-Rohquellen ausschließlich privat unter
-   `health/garmin_raw`.
+   `health/garmin_raw`. `synchronisiere_garmin_langzeit()` arbeitet rückwärts in
+   fortsetzbaren Paketen; Rohquellen älter als 90 Tage werden nicht gespeichert.
+   `history_analytics.py` erzeugt kompakte Langzeitaggregate.
 4. `gpt_action/worker.js` authentifiziert den GPT per Bearer-Schlüssel, liest das
    feste Dokument, startet den festen Workflow und filtert dessen Statusantwort.
-5. `gpt_action/openapi.yaml` beschreibt die Report-, Historien-, Start- und
-   Status-Actions.
+5. `gpt_action/openapi.yaml` beschreibt die Report-, Historien-, Langzeit-,
+   Start- und Status-Actions.
 6. Im Abendmodus liest `morgenreport.py --heutige-aktivitaeten` nur den heutigen
    Garmin-Tag und aktualisiert per Firestore-Update-Mask ausschließlich
    `aktivitaeten_heute`, dessen Datum und dessen Aktualisierungszeit.
@@ -51,6 +53,9 @@ erzeugt einen Garmin-Morgenreport, versendet ihn und stellt den neuesten Report
 - `operationId: getSchlafhistorie` stabil halten. Diese Route darf ausschließlich
   7 bis 28 Tage aus dem festen Spiegel liefern und keine freien Firestore- oder
   Datumsparameter erhalten.
+- `operationId: getLangzeitvergleich` stabil halten. Die Route liefert nur
+  vorberechnete Aggregate, höchstens zwölf erlaubte Kennzahlen und niemals
+  private Tages- oder Rohdaten.
 - Auch `startMorgenreport` und `getMorgenreportStatus` stabil halten. Der Start
   muss fest auf `main` und `.github/workflows/morgenreport.yml` begrenzt bleiben.
 - `getHeutigeAktivitaeten` und `startHeutigeAktivitaetenAktualisierung` ebenfalls
