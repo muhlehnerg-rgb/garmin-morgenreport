@@ -1056,6 +1056,10 @@ def hole_garmin_rohmanifest_firestore(tag):
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
+    return {
+        key: firestore_wert_lesen(value)
+        for key, value in resp.json().get("fields", {}).items()
+    }
 
 
 def aktualisiere_historientag_garmin_firestore(daten, score, empfehlung):

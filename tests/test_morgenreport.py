@@ -1,6 +1,6 @@
 import os
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import ANY, Mock, patch
 
 import morgenreport
@@ -310,6 +310,32 @@ class GarminHistorienDatenTests(unittest.TestCase):
 
 
 class FirestoreTests(unittest.TestCase):
+    @patch("morgenreport.firestore_auth_headers", return_value={"Authorization": "Bearer test"})
+    @patch("morgenreport.firestore_request")
+    def test_rohmanifest_wird_als_python_daten_gelesen(self, request, _headers):
+        request.return_value.status_code = 200
+        request.return_value.json.return_value = {
+            "fields": {
+                "datum": {"stringValue": "2026-08-19"},
+                "schema_version": {"integerValue": "1"},
+                "quellen": {
+                    "arrayValue": {
+                        "values": [
+                            {"stringValue": "sleep"},
+                            {"stringValue": "hrv"},
+                        ]
+                    }
+                },
+            }
+        }
+
+        manifest = morgenreport.hole_garmin_rohmanifest_firestore("2026-08-19")
+
+        self.assertEqual(manifest["datum"], "2026-08-19")
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["quellen"], ["sleep", "hrv"])
+        request.return_value.raise_for_status.assert_called_once_with()
+
     @patch("morgenreport.firestore_auth_headers", return_value={"Authorization": "Bearer test"})
     @patch("morgenreport.requests.post")
     def test_historienzeitraum_nutzt_eine_sortierte_firestore_abfrage(
@@ -677,7 +703,10 @@ class FirestoreTests(unittest.TestCase):
         self.assertEqual(ergebnis["historientage_ergaenzt"], 1)
         self.assertEqual(ergebnis["rohtage_ergaenzt"], 1)
         self.assertEqual(ergebnis["uebersprungen"], 1)
-        loesche_rohtag.assert_called_once_with("2026-05-20")
+        abgelaufener_tag = (
+            date.today() - timedelta(days=morgenreport.GARMIN_ROHDATEN_AUFBEWAHRUNG_TAGE)
+        ).isoformat()
+        loesche_rohtag.assert_called_once_with(abgelaufener_tag)
 
 
 class GarminLangzeitImportTests(unittest.TestCase):
